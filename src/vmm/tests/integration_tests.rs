@@ -544,6 +544,60 @@ fn test_incremental_snapshot_arms_soft_dirty_window() {
     verify_load_snapshot(soft_dirty_state, soft_dirty_memory);
 }
 
+/// A Full snapshot is a complete baseline, so it must arm the soft-dirty
+/// window for the next SoftDirty generation. Otherwise the next request takes
+/// the unarmed first-window path and redundantly scans and rewrites the whole
+/// cumulative anonymous set.
+#[test]
+fn test_full_snapshot_arms_soft_dirty_window() {
+    // Inspecting the window reads /proc/kpageflags. Skip when the runner is
+    // unprivileged rather than failing the snapshot behavior test.
+    if std::fs::File::open("/proc/kpageflags").is_err() {
+        eprintln!("skipping: opening /proc/kpageflags requires CAP_SYS_ADMIN");
+        return;
+    }
+
+    let full_state = TempFile::new().unwrap();
+    let full_memory = TempFile::new().unwrap();
+    let (vmm, _) = create_vmm(Some(NOISY_KERNEL_IMAGE), false, true, false, false);
+    let mut controller = RuntimeApiController::new(vmm.clone());
+    let mut event_manager = EventManager::new().unwrap();
+
+    thread::sleep(Duration::from_millis(100));
+    controller
+        .handle_request(VmmAction::Pause, &mut event_manager)
+        .unwrap();
+    controller
+        .handle_request(
+            VmmAction::CreateSnapshot(CreateSnapshotParams {
+                snapshot_type: SnapshotType::Full,
+                snapshot_path: full_state.as_path().to_path_buf(),
+                mem_file_path: Some(full_memory.as_path().to_path_buf()),
+                deferred_sync: false,
+                state_only: false,
+            }),
+            &mut event_manager,
+        )
+        .unwrap();
+
+    match controller
+        .handle_request(VmmAction::GetDirtyMemoryRanges, &mut event_manager)
+        .unwrap()
+    {
+        VmmData::DirtyMemoryRanges(ranges) => {
+            assert!(ranges.armed, "Full snapshot left the ledger unarmed");
+            assert_eq!(
+                ranges.dirty_pages, 0,
+                "nothing ran between the Full arm and this preview"
+            );
+        }
+        response => panic!("unexpected response to GetDirtyMemoryRanges: {response:?}"),
+    }
+
+    vmm.lock().unwrap().stop(FcExitCode::Ok);
+    verify_load_snapshot(full_state, full_memory);
+}
+
 #[test]
 fn test_create_and_load_snapshot() {
     for diff_snap in [false, true] {
