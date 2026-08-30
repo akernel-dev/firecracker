@@ -27,7 +27,7 @@ use vmm_sys_util::terminal::Terminal;
 
 use crate::arch::{GSI_MSI_END, host_page_size};
 pub use crate::arch::{KvmVm, KvmVmError, VmState};
-use crate::logger::{debug, info};
+use crate::logger::{debug, info, warn};
 use crate::persist::CreateSnapshotError;
 use crate::vmm_config::snapshot::SnapshotType;
 use crate::vstate::bus::Bus;
@@ -657,6 +657,26 @@ impl KvmVm {
                 self.guest_memory().dump(&mut file)?;
                 self.reset_dirty_bitmap();
                 self.guest_memory().reset_dirty();
+
+                // A Full image is a complete incremental baseline. Open a new
+                // soft-dirty window after writing it so the next SoftDirty
+                // request can patch only post-baseline changes instead of
+                // rescanning and rewriting the cumulative anonymous set. Full
+                // snapshots remain usable on hosts without soft-dirty support;
+                // those hosts explicitly degrade to anon-only accounting.
+                let accounting = &self.common.soft_dirty_accounting;
+                let arm_result = if accounting.is_armed() {
+                    accounting.ack_persisted()
+                } else {
+                    accounting.arm().map(|_| ())
+                };
+                if let Err(error) = arm_result {
+                    accounting.disarm();
+                    warn!(
+                        "Full snapshot could not arm the soft-dirty window: {}",
+                        error
+                    );
+                }
             }
             SnapshotType::Incremental | SnapshotType::SoftDirty => {
                 self.snapshot_memory_incremental(&mut file, snapshot_type)?;
