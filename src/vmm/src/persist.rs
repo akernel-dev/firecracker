@@ -5,7 +5,7 @@
 
 use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::mem::forget;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -176,10 +176,14 @@ pub enum CreateSnapshotError {
     PagemapAnon(#[from] crate::vstate::pagemap_anon::PagemapAnonError),
     /// soft-dirty ledger error: {0}
     SoftDirty(#[from] crate::vstate::soft_dirty::SoftDirtyError),
+    /// virtio-fs snapshot error: {0}
+    VirtioFs(#[from] crate::devices::virtio::virtio_fs::VirtioFsError),
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(10, 0, 0);
+// Version 11 adds the optional MMIO virtio-fs frontend state. Runtime bundles
+// remain responsible for restoring snapshots with the exact compatible VMM.
+pub const SNAPSHOT_VERSION: Version = Version::new(11, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -214,37 +218,70 @@ pub fn create_snapshot(
         }
     };
 
-    let microvm_state = vmm
-        .save_state(vm_info)
-        .map_err(CreateSnapshotError::MicrovmState)?;
-
-    snapshot_state_to_file(&microvm_state, &params.snapshot_path, params.deferred_sync)?;
-
-    let kvm_vm = if let Some(mem_file_path) = mem_file_path {
-        let kvm_vm = vmm.vm.as_kvm().ok_or_else(|| {
-            CreateSnapshotError::MicrovmState(MicrovmStateError::NotAllowed(
-                "snapshot requires KVM".into(),
-            ))
-        })?;
-        kvm_vm.snapshot_memory_to_file(
-            mem_file_path,
-            params.snapshot_type,
-            params.deferred_sync,
-        )?;
-        Some(kvm_vm)
-    } else {
-        None
-    };
-
-    // We need to mark queues as dirty again for all activated devices. The reason we
-    // do it here is that we don't mark pages as dirty during runtime
-    // for queue objects.
-    if let Some(kvm_vm) = kvm_vm {
-        vmm.device_manager
-            .mark_virtio_queue_memory_dirty(kvm_vm.guest_memory());
+    let has_virtio_fs = vmm.has_virtio_fs();
+    match (has_virtio_fs, params.fs_state_path.as_deref()) {
+        (true, None) => {
+            return Err(CreateSnapshotError::InvalidParams(
+                "fs_state_path is required when virtio-fs is configured",
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(CreateSnapshotError::InvalidParams(
+                "fs_state_path was provided but no virtio-fs device is configured",
+            ));
+        }
+        _ => {}
     }
 
-    Ok(())
+    if let Some(path) = params.fs_state_path.as_deref() {
+        vmm.prepare_virtio_fs_snapshot(path, params.deferred_sync)?;
+    }
+    let virtio_fs_dirty_ranges = vmm.virtio_fs_dirty_ranges();
+
+    let snapshot_result = (|| {
+        let microvm_state = vmm
+            .save_state(vm_info)
+            .map_err(CreateSnapshotError::MicrovmState)?;
+
+        snapshot_state_to_file(&microvm_state, &params.snapshot_path, params.deferred_sync)?;
+
+        let kvm_vm = if let Some(mem_file_path) = mem_file_path {
+            let kvm_vm = vmm.vm.as_kvm().ok_or_else(|| {
+                CreateSnapshotError::MicrovmState(MicrovmStateError::NotAllowed(
+                    "snapshot requires KVM".into(),
+                ))
+            })?;
+            kvm_vm.snapshot_memory_to_file(
+                mem_file_path,
+                params.snapshot_type,
+                params.deferred_sync,
+                &virtio_fs_dirty_ranges,
+                has_virtio_fs,
+            )?;
+            Some(kvm_vm)
+        } else {
+            None
+        };
+
+        // Queue memory is modified outside the normal dirty accounting.
+        if let Some(kvm_vm) = kvm_vm {
+            vmm.device_manager
+                .mark_virtio_queue_memory_dirty(kvm_vm.guest_memory());
+        }
+        Ok(())
+    })();
+
+    let finish_result = if has_virtio_fs {
+        vmm.finish_virtio_fs_snapshot(snapshot_result.is_ok())
+            .map_err(CreateSnapshotError::VirtioFs)
+    } else {
+        Ok(())
+    };
+
+    match (snapshot_result, finish_result) {
+        (Err(snapshot_error), _) => Err(snapshot_error),
+        (Ok(()), finish) => finish,
+    }
 }
 
 fn snapshot_state_to_file(
@@ -410,6 +447,8 @@ pub enum RestoreFromSnapshotError {
     GuestMemory(#[from] RestoreFromSnapshotGuestMemoryError),
     /// Failed to build microVM from snapshot: {0}
     Build(#[from] BuildMicrovmFromSnapshotError),
+    /// Invalid guest memory backend configuration: {0}
+    InvalidMemoryBackend(&'static str),
 }
 /// Sub-Error type for [`restore_from_snapshot`] to contain either [`GuestMemoryFromFileError`] or
 /// [`GuestMemoryFromUffdError`] within [`RestoreFromSnapshotError`].
@@ -429,7 +468,30 @@ pub fn restore_from_snapshot(
     params: &LoadSnapshotParams,
     vm_resources: &mut VmResources,
 ) -> Result<Arc<Mutex<Vmm>>, RestoreFromSnapshotError> {
+    match (
+        &params.mem_backend.backend_type,
+        params.mem_backend.source_path.as_ref(),
+    ) {
+        (MemBackendType::SharedFile, None) => {
+            return Err(RestoreFromSnapshotError::InvalidMemoryBackend(
+                "source_path is required for SharedFile",
+            ));
+        }
+        (MemBackendType::File | MemBackendType::Uffd, Some(_)) => {
+            return Err(RestoreFromSnapshotError::InvalidMemoryBackend(
+                "source_path is allowed only for SharedFile",
+            ));
+        }
+        _ => {}
+    }
     let mut microvm_state = snapshot_state_from_file(&params.snapshot_path)?;
+    if microvm_state.device_states.mmio_state.fs_device.is_some()
+        && params.mem_backend.backend_type != MemBackendType::SharedFile
+    {
+        return Err(RestoreFromSnapshotError::InvalidMemoryBackend(
+            "virtio-fs snapshots require the SharedFile memory backend",
+        ));
+    }
     for entry in &params.network_overrides {
         microvm_state
             .device_states
@@ -475,6 +537,27 @@ pub fn restore_from_snapshot(
             .clone_from(&vsock_override.uds_path);
     }
 
+    match (
+        microvm_state.device_states.mmio_state.fs_device.as_mut(),
+        params.fs_override.as_ref(),
+    ) {
+        (Some(device), Some(fs_override)) if device.device_id == fs_override.fs_id => {
+            device
+                .device_state
+                .config
+                .socket_path
+                .clone_from(&fs_override.socket_path);
+            device.device_state.backend_state_path = Some(fs_override.state_path.clone());
+        }
+        (Some(_), Some(_)) | (None, Some(_)) => {
+            return Err(SnapshotStateFromFileError::UnknownFsDevice.into());
+        }
+        (Some(_), None) => {
+            return Err(SnapshotStateFromFileError::MissingFsOverride.into());
+        }
+        (None, None) => {}
+    }
+
     let track_dirty_pages = params.track_dirty_pages;
 
     let vcpu_count = microvm_state
@@ -503,7 +586,7 @@ pub fn restore_from_snapshot(
     let mem_backend_path = &params.mem_backend.backend_path;
     let mem_state = &microvm_state.vm_state.memory;
 
-    let (guest_memory, uffd) = match params.mem_backend.backend_type {
+    let (guest_memory, uffd) = match &params.mem_backend.backend_type {
         MemBackendType::File => {
             if vm_resources.machine_config.huge_pages.is_hugetlbfs() {
                 return Err(RestoreFromSnapshotGuestMemoryError::File(
@@ -514,6 +597,24 @@ pub fn restore_from_snapshot(
             (
                 guest_memory_from_file(mem_backend_path, mem_state, track_dirty_pages)
                     .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
+                None,
+            )
+        }
+        MemBackendType::SharedFile => {
+            if vm_resources.machine_config.huge_pages.is_hugetlbfs() {
+                return Err(RestoreFromSnapshotGuestMemoryError::File(
+                    GuestMemoryFromFileError::HugetlbfsSnapshot,
+                )
+                .into());
+            }
+            (
+                guest_memory_from_shared_file(
+                    params.mem_backend.source_path.as_ref().unwrap(),
+                    mem_backend_path,
+                    mem_state,
+                    track_dirty_pages,
+                )
+                .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
                 None,
             )
         }
@@ -549,6 +650,10 @@ pub enum SnapshotStateFromFileError {
     UnknownNetworkDevice,
     /// Unknown Vsock Device.
     UnknownVsockDevice,
+    /// Unknown virtio-fs device.
+    UnknownFsDevice,
+    /// Snapshot contains virtio-fs but no fs_override was supplied.
+    MissingFsOverride,
 }
 
 fn snapshot_state_from_file(
@@ -569,6 +674,10 @@ pub enum GuestMemoryFromFileError {
     Restore(#[from] MemoryError),
     /// Cannot restore hugetlbfs backed snapshot by mapping the memory file. Please use uffd.
     HugetlbfsSnapshot,
+    /// Shared live-memory target already exists: {0}
+    LiveMemoryTargetExists(std::path::PathBuf),
+    /// Shared-memory source is not a regular file: {0}
+    SharedSourceNotRegular(std::path::PathBuf),
 }
 
 fn guest_memory_from_file(
@@ -578,6 +687,82 @@ fn guest_memory_from_file(
 ) -> Result<Vec<GuestRegionMmap>, GuestMemoryFromFileError> {
     let mem_file = File::open(mem_file_path)?;
     let guest_mem = memory::snapshot_file(mem_file, mem_state.regions(), track_dirty_pages)?;
+    Ok(guest_mem)
+}
+
+fn guest_memory_from_shared_file(
+    source_path: &Path,
+    live_path: &Path,
+    mem_state: &GuestMemoryState,
+    track_dirty_pages: bool,
+) -> Result<Vec<GuestRegionMmap>, GuestMemoryFromFileError> {
+    use std::os::fd::AsRawFd;
+
+    struct RemoveOnError<'a> {
+        path: &'a Path,
+        keep: bool,
+    }
+
+    impl Drop for RemoveOnError<'_> {
+        fn drop(&mut self) {
+            if !self.keep {
+                let _ = std::fs::remove_file(self.path);
+            }
+        }
+    }
+
+    if live_path.exists() {
+        return Err(GuestMemoryFromFileError::LiveMemoryTargetExists(
+            live_path.to_path_buf(),
+        ));
+    }
+
+    let mut source = File::open(source_path)?;
+    if !source.metadata()?.file_type().is_file() {
+        return Err(GuestMemoryFromFileError::SharedSourceNotRegular(
+            source_path.to_path_buf(),
+        ));
+    }
+    let mut live = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(live_path)?;
+    // create_new() establishes that this invocation owns the target. Do not
+    // leave a zero-length or partially initialized live-memory file behind
+    // when cloning or mapping fails.
+    let mut cleanup = RemoveOnError {
+        path: live_path,
+        keep: false,
+    };
+
+    // Linux uapi: #define FICLONE _IOW(0x94, 9, int)
+    const FICLONE: libc::c_ulong = 0x4004_9409;
+    // SAFETY: both descriptors are valid regular files and the ioctl only
+    // clones extents from the read-only source into the newly created target.
+    let result = unsafe { libc::ioctl(live.as_raw_fd(), FICLONE as _, source.as_raw_fd()) };
+    if result != 0 {
+        // Reflink is the fast path, not a correctness requirement. A new
+        // independent live file is still safe on filesystems without
+        // FICLONE; copy the immutable source without adding an fsync to the
+        // restore path.
+        live.set_len(0)?;
+        source.seek(SeekFrom::Start(0))?;
+        live.seek(SeekFrom::Start(0))?;
+        let expected = source.metadata()?.len();
+        let copied = std::io::copy(&mut source, &mut live)?;
+        if copied != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "checkpoint memory changed while copying",
+            )
+            .into());
+        }
+    }
+
+    let guest_mem =
+        memory::snapshot_live_file_shared(live, mem_state.regions(), track_dirty_pages)?;
+    cleanup.keep = true;
     Ok(guest_mem)
 }
 
@@ -708,8 +893,10 @@ fn send_uffd_handshake(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
 
+    use vm_memory::{Bytes, MemoryRegionAddress};
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
@@ -846,6 +1033,115 @@ mod tests {
         assert_eq!(uffd_regions[0].size, 0x20000);
         assert_eq!(uffd_regions[0].offset, 0);
         assert_eq!(uffd_regions[0].page_size, HugePageConfig::None.page_size());
+    }
+
+    fn single_region_memory_state(size: usize) -> GuestMemoryState {
+        GuestMemoryState {
+            regions: vec![GuestMemoryRegionState {
+                base_address: 0,
+                size,
+                region_type: GuestRegionType::Dram,
+                plugged: vec![true],
+            }],
+        }
+    }
+
+    #[test]
+    fn test_guest_memory_from_shared_file_isolates_checkpoint() {
+        let source = TempFile::new().unwrap();
+        source.as_file().set_len(4096).unwrap();
+        let mut source_writer = source.as_file();
+        source_writer.write_all(b"checkpoint").unwrap();
+
+        let mut live = TempFile::new().unwrap();
+        let live_path = live.as_path().to_path_buf();
+        live.remove().unwrap();
+
+        let regions = guest_memory_from_shared_file(
+            source.as_path(),
+            &live_path,
+            &single_region_memory_state(4096),
+            true,
+        )
+        .unwrap();
+        regions[0]
+            .write_slice(b"live-memory", MemoryRegionAddress(0))
+            .unwrap();
+
+        let mut live_bytes = [0_u8; 11];
+        File::open(&live_path)
+            .unwrap()
+            .read_exact(&mut live_bytes)
+            .unwrap();
+        assert_eq!(&live_bytes, b"live-memory");
+
+        let mut source_bytes = [0_u8; 10];
+        File::open(source.as_path())
+            .unwrap()
+            .read_exact(&mut source_bytes)
+            .unwrap();
+        assert_eq!(&source_bytes, b"checkpoint");
+    }
+
+    #[test]
+    fn test_guest_memory_from_shared_file_rejects_existing_target() {
+        let source = TempFile::new().unwrap();
+        source.as_file().set_len(4096).unwrap();
+        let live = TempFile::new().unwrap();
+
+        let err = guest_memory_from_shared_file(
+            source.as_path(),
+            live.as_path(),
+            &single_region_memory_state(4096),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            GuestMemoryFromFileError::LiveMemoryTargetExists(path)
+                if path == live.as_path()
+        ));
+    }
+
+    #[test]
+    fn test_guest_memory_from_shared_file_removes_invalid_target() {
+        let source = TempFile::new().unwrap();
+        source.as_file().set_len(1).unwrap();
+        let mut live = TempFile::new().unwrap();
+        let live_path = live.as_path().to_path_buf();
+        live.remove().unwrap();
+
+        let err = guest_memory_from_shared_file(
+            source.as_path(),
+            &live_path,
+            &single_region_memory_state(4096),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GuestMemoryFromFileError::Restore(_)));
+        assert!(!live_path.exists());
+    }
+
+    #[test]
+    fn test_guest_memory_from_shared_file_rejects_non_regular_source() {
+        let mut live = TempFile::new().unwrap();
+        let live_path = live.as_path().to_path_buf();
+        live.remove().unwrap();
+
+        let source_path = std::env::temp_dir();
+        let err = guest_memory_from_shared_file(
+            &source_path,
+            &live_path,
+            &single_region_memory_state(4096),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            GuestMemoryFromFileError::SharedSourceNotRegular(path)
+                if path == source_path
+        ));
+        assert!(!live_path.exists());
     }
 
     #[test]

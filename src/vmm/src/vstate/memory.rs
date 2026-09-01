@@ -601,6 +601,32 @@ pub fn snapshot_file(
     )
 }
 
+/// Creates guest memory from a caller-owned live-memory file using a writable
+/// shared mapping. Callers must create this file independently from the
+/// committed checkpoint image before invoking this function.
+pub fn snapshot_live_file_shared(
+    file: File,
+    regions: impl Iterator<Item = (GuestAddress, usize)>,
+    track_dirty_pages: bool,
+) -> Result<Vec<GuestRegionMmap>, MemoryError> {
+    let regions: Vec<_> = regions.collect();
+    let memory_size = regions
+        .iter()
+        .try_fold(0u64, |acc, (_, size)| acc.checked_add(*size as u64))
+        .ok_or(MemoryError::OffsetTooLarge)?;
+    let file_size = file.metadata().map_err(MemoryError::FileMetadata)?.len();
+    if memory_size > file_size {
+        return Err(MemoryError::OffsetTooLarge);
+    }
+
+    create(
+        regions.into_iter(),
+        libc::MAP_SHARED,
+        Some(file),
+        track_dirty_pages,
+    )
+}
+
 /// Defines the interface for snapshotting memory.
 pub trait GuestMemoryExtension
 where

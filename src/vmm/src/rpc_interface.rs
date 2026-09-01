@@ -44,6 +44,7 @@ use crate::vmm_config::net::{
 use crate::vmm_config::pmem::{PmemConfig, PmemConfigError, PmemDeviceUpdateConfig};
 use crate::vmm_config::serial::SerialConfig;
 use crate::vmm_config::snapshot::{CreateSnapshotParams, LoadSnapshotParams, SnapshotType};
+use crate::vmm_config::virtio_fs::{FsConfig, FsConfigError};
 use crate::vmm_config::vsock::{VsockConfigError, VsockDeviceConfig};
 use crate::vmm_config::{self, RateLimiterUpdate};
 
@@ -120,6 +121,8 @@ pub enum VmmAction {
     /// `VsockDeviceConfig` as input. This action can only be called before the microVM has
     /// booted.
     SetVsockDevice(VsockDeviceConfig),
+    /// Set the single virtio-fs device. This action is preboot-only.
+    SetFsDevice(FsConfig),
     /// Set the entropy device using `EntropyDeviceConfig` as input. This action can only be called
     /// before the microVM has booted.
     SetEntropyDevice(EntropyDeviceConfig),
@@ -212,6 +215,8 @@ pub enum VmmActionError {
     StartMicrovm(#[from] StartMicrovmError),
     /// Vsock config error: {0}
     VsockConfig(#[from] VsockConfigError),
+    /// Virtio-fs config error: {0}
+    FsConfig(#[from] FsConfigError),
     /// Device ID in use
     DeviceIdInUse,
     /// Device not found
@@ -500,6 +505,7 @@ impl<'a> PrebootApiController<'a> {
             ),
             SetBalloonDevice(config) => self.set_balloon_device(config),
             SetVsockDevice(config) => self.set_vsock_device(config),
+            SetFsDevice(config) => self.set_fs_device(config),
             SetMmdsConfiguration(config) => self.set_mmds_config(config),
             StartMicroVm => self.start_microvm(),
             UpdateMachineConfiguration(config) => self.update_machine_config(config),
@@ -612,6 +618,14 @@ impl<'a> PrebootApiController<'a> {
             .set_vsock_device(cfg)
             .map(|()| VmmData::Empty)
             .map_err(VmmActionError::VsockConfig)
+    }
+
+    fn set_fs_device(&mut self, cfg: FsConfig) -> Result<VmmData, VmmActionError> {
+        self.boot_path = true;
+        self.vm_resources
+            .set_fs_device(cfg)
+            .map(|()| VmmData::Empty)
+            .map_err(VmmActionError::FsConfig)
     }
 
     fn set_entropy_device(&mut self, cfg: EntropyDeviceConfig) -> Result<VmmData, VmmActionError> {
@@ -861,6 +875,7 @@ impl RuntimeApiController {
             | PutCpuConfiguration(_)
             | SetBalloonDevice(_)
             | SetVsockDevice(_)
+            | SetFsDevice(_)
             | SetMmdsConfiguration(_)
             | SetEntropyDevice(_)
             | SetMemoryHotplugDevice(_)
@@ -1271,6 +1286,7 @@ mod tests {
                 mem_file_path: Some(PathBuf::new()),
                 state_only: false,
                 deferred_sync: false,
+                fs_state_path: None,
             },
         )));
         #[cfg(target_arch = "x86_64")]
@@ -1356,11 +1372,13 @@ mod tests {
                 mem_backend: MemBackendConfig {
                     backend_type: MemBackendType::File,
                     backend_path: PathBuf::new(),
+                    source_path: None,
                 },
                 track_dirty_pages: false,
                 resume_vm: false,
                 network_overrides: vec![],
                 vsock_override: None,
+                fs_override: None,
                 clock_realtime: false,
             },
         )));

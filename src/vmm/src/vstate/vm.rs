@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Barrier, Mutex, MutexGuard};
@@ -582,6 +582,8 @@ impl KvmVm {
         mem_file_path: &Path,
         snapshot_type: SnapshotType,
         defer_sync: bool,
+        external_dirty_ranges: &[MemoryRange],
+        include_kvm_dirty: bool,
     ) -> Result<(), CreateSnapshotError> {
         use self::CreateSnapshotError::*;
 
@@ -652,14 +654,43 @@ impl KvmVm {
             SnapshotType::Diff => {
                 let dirty_bitmap = self.get_dirty_bitmap()?;
                 self.guest_memory().dump_dirty(&mut file, &dirty_bitmap)?;
+                let mappings = memory_file_mappings(self.guest_memory());
+                write_ranges_at_offsets(
+                    self.guest_memory(),
+                    &mappings,
+                    &mut file,
+                    external_dirty_ranges,
+                )
+                .map_err(|e| MemoryBackingFile("write_all_at", e))?;
             }
             SnapshotType::Full => {
                 self.guest_memory().dump(&mut file)?;
                 self.reset_dirty_bitmap();
                 self.guest_memory().reset_dirty();
+                if include_kvm_dirty {
+                    // A Full snapshot is the base for the next SoftDirty
+                    // generation. Open its process ledger while the VM is
+                    // still paused so later host and vhost writes can be
+                    // merged as a true delta instead of another baseline.
+                    let accounting = &self.common.soft_dirty_accounting;
+                    let arm_result = if accounting.is_armed() {
+                        accounting.ack_persisted()
+                    } else {
+                        accounting.arm().map(|_| ())
+                    };
+                    if let Err(error) = arm_result {
+                        accounting.disarm();
+                        return Err(error.into());
+                    }
+                }
             }
             SnapshotType::Incremental | SnapshotType::SoftDirty => {
-                self.snapshot_memory_incremental(&mut file, snapshot_type)?;
+                self.snapshot_memory_incremental(
+                    &mut file,
+                    snapshot_type,
+                    external_dirty_ranges,
+                    include_kvm_dirty,
+                )?;
             }
         };
 
@@ -695,6 +726,8 @@ impl KvmVm {
         &self,
         file: &mut File,
         snapshot_type: SnapshotType,
+        external_dirty_ranges: &[MemoryRange],
+        include_kvm_dirty: bool,
     ) -> Result<(), CreateSnapshotError> {
         use self::CreateSnapshotError::*;
 
@@ -709,7 +742,7 @@ impl KvmVm {
             .collect();
         let mappings = memory_file_mappings(guest_memory);
 
-        match snapshot_type {
+        let ledger_result = match snapshot_type {
             SnapshotType::Incremental => {
                 let t_ledger = std::time::Instant::now();
                 let (ranges, stats) =
@@ -888,7 +921,33 @@ impl KvmVm {
                 "snapshot_memory_incremental",
                 io::Error::new(io::ErrorKind::InvalidInput, "not an incremental type"),
             )),
+        };
+        ledger_result?;
+
+        if include_kvm_dirty {
+            file.seek(SeekFrom::Start(0))
+                .map_err(|e| MemoryBackingFile("seek", e))?;
+            let dirty_bitmap = self.get_dirty_bitmap()?;
+            let kvm_dirty_pages: u64 = dirty_bitmap
+                .values()
+                .flat_map(|words| words.iter())
+                .map(|word| u64::from(word.count_ones()))
+                .sum();
+            let external_dirty_pages: u64 = external_dirty_ranges
+                .iter()
+                .map(|range| range.length.div_ceil(crate::arch::host_page_size() as u64))
+                .sum();
+            info!(
+                "Incremental snapshot supplemental ledgers: {} KVM pages, {} external pages in {} ranges",
+                kvm_dirty_pages,
+                external_dirty_pages,
+                external_dirty_ranges.len(),
+            );
+            guest_memory.dump_dirty(file, &dirty_bitmap)?;
         }
+        write_ranges_at_offsets(guest_memory, &mappings, file, external_dirty_ranges)
+            .map_err(|e| MemoryBackingFile("write_all_at", e))?;
+        Ok(())
     }
 
     /// Read-only preview of the pages the next incremental snapshot would

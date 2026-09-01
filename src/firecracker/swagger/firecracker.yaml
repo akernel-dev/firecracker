@@ -339,6 +339,38 @@ paths:
           schema:
             $ref: "#/definitions/Error"
 
+  /fs/{fs_id}:
+    put:
+      summary: Configures the single vhost-user virtio-fs device. Pre-boot only.
+      description:
+        The backend must support MQ, REPLY_ACK, DEVICE_STATE, LOG_SHMFD, and
+        VHOST_F_LOG_ALL. Firecracker supports this device only with MMIO
+        transport. The orchestrator is responsible for starting virtiofsd
+        read-only.
+      operationId: putGuestFsByID
+      parameters:
+        - name: fs_id
+          in: path
+          description: Identifier of the filesystem device
+          required: true
+          type: string
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/Fs"
+      responses:
+        204:
+          description: Virtio-fs device configured
+        400:
+          description: Virtio-fs device cannot be configured
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: Internal server error.
+          schema:
+            $ref: "#/definitions/Error"
+
   /pmem/{id}:
     put:
       summary: Creates or updates a pmem device. Pre-boot only.
@@ -1298,6 +1330,24 @@ definitions:
           Path to the socket of vhost-user-block backend.
           This field is required for vhost-user-block config should be omitted for virtio-block configuration.
 
+  Fs:
+    type: object
+    required:
+      - fs_id
+      - socket_path
+    properties:
+      fs_id:
+        type: string
+        description: Identifier matching the fs_id path parameter.
+      socket_path:
+        type: string
+        description: Path to the vhost-user socket served by virtiofsd.
+      tag:
+        type: string
+        default: sandboxfs
+        maxLength: 36
+        description: Mount tag exposed to the guest; never silently truncated.
+
   Pmem:
     type: object
     required:
@@ -1368,6 +1418,8 @@ definitions:
           $ref: "#/definitions/Pmem"
       vsock:
         $ref: "#/definitions/Vsock"
+      fs:
+        $ref: "#/definitions/Fs"
       entropy:
         $ref: "#/definitions/EntropyDevice"
 
@@ -1492,6 +1544,7 @@ definitions:
         type: string
         enum:
           - File
+          - SharedFile
           - Uffd
       backend_path:
         type: string
@@ -1500,6 +1553,15 @@ definitions:
           2) Path to the UDS where a process is listening for a UFFD initialization
           control payload and open file descriptor that it can use to serve this
           process's guest memory page faults
+          3) For SharedFile, a new sandbox-owned live-memory path that must not
+          already exist. Firecracker reflink-clones source_path to this path,
+          or copies it when reflink is unavailable, before mapping the new
+          live file writable and shared.
+      source_path:
+        type: string
+        description:
+          Immutable committed checkpoint memory. Required only for SharedFile;
+          Firecracker never maps this path writable.
 
   Metrics:
     type: object
@@ -1685,6 +1747,11 @@ definitions:
           that fsyncs the files before committing a manifest). When false
           (default), a successful create request leaves the files durably
           written.
+      fs_state_path:
+        type: string
+        description:
+          Path to the virtiofsd DEVICE_STATE sidecar. Required exactly when
+          the microVM has a virtio-fs device.
 
   NetworkOverride:
     type: object
@@ -1715,6 +1782,23 @@ definitions:
         type: string
         description:
           The new path for the backing Unix Domain Socket.
+
+  FsOverride:
+    type: object
+    description: Reconnects snapshotted virtio-fs to a replacement virtiofsd.
+    required:
+      - fs_id
+      - socket_path
+      - state_path
+    properties:
+      fs_id:
+        type: string
+      socket_path:
+        type: string
+        description: New vhost-user socket path.
+      state_path:
+        type: string
+        description: Path to the saved virtiofsd DEVICE_STATE sidecar.
 
   SnapshotLoadParams:
     type: object
@@ -1763,6 +1847,11 @@ definitions:
           for restoring a snapshot with a different socket path than the one used
           when the snapshot was created. For example, when the original socket path
           is no longer available or when deploying to a different environment.
+      fs_override:
+        $ref: "#/definitions/FsOverride"
+        description:
+          Required when the snapshot contains virtio-fs. Supplies the replacement
+          socket and backend migration state.
       clock_realtime:
         type: boolean
         description:

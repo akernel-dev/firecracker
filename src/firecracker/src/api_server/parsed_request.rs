@@ -30,6 +30,7 @@ use super::request::snapshot::{
     parse_get_dirty_memory_ranges, parse_patch_vm_state, parse_put_snapshot,
 };
 use super::request::version::parse_get_version;
+use super::request::virtio_fs::parse_put_fs;
 use super::request::vsock::parse_put_vsock;
 use crate::api_server::request::hotplug::memory::{
     parse_get_memory_hotplug, parse_patch_memory_hotplug, parse_put_memory_hotplug,
@@ -120,6 +121,7 @@ impl TryFrom<&Request> for ParsedRequest {
             (Method::Put, "snapshot", Some(body)) => parse_put_snapshot(body, path_tokens.next()),
             (Method::Put, "vsock", Some(body)) => parse_put_vsock(body),
             (Method::Put, "entropy", Some(body)) => parse_put_entropy(body),
+            (Method::Put, "fs", Some(body)) => parse_put_fs(body, path_tokens.next()),
             (Method::Put, "hotplug", Some(body)) if path_tokens.next() == Some("memory") => {
                 parse_put_memory_hotplug(body)
             }

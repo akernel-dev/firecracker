@@ -285,6 +285,7 @@ mod tests {
                 mem_file_path: Some(PathBuf::new()),
                 state_only: false,
                 deferred_sync: false,
+                fs_state_path: None,
             })),
             start_time_us,
         );
@@ -300,6 +301,7 @@ mod tests {
                 mem_file_path: Some(PathBuf::new()),
                 state_only: false,
                 deferred_sync: false,
+                fs_state_path: None,
             })),
             start_time_us,
         );
