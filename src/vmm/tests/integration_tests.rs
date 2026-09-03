@@ -252,6 +252,7 @@ fn verify_create_snapshot(
         mem_file_path: Some(memory_file.as_path().to_path_buf()),
         deferred_sync: false,
         state_only: false,
+        fs_state_path: None,
     };
 
     controller
@@ -317,11 +318,13 @@ fn verify_load_snapshot(snapshot_file: TempFile, memory_file: TempFile) {
             mem_backend: MemBackendConfig {
                 backend_path: memory_file.as_path().to_path_buf(),
                 backend_type: MemBackendType::File,
+                source_path: None,
             },
             track_dirty_pages: false,
             resume_vm: true,
             network_overrides: vec![],
             vsock_override: None,
+            fs_override: None,
             clock_realtime: false,
         }))
         .unwrap();
@@ -356,6 +359,7 @@ fn test_create_snapshot_invalid_params_no_side_effects() {
             mem_file_path: None,
             deferred_sync: false,
             state_only: false,
+            fs_state_path: None,
         },
         // state_only=true with mem_file_path.
         CreateSnapshotParams {
@@ -364,6 +368,7 @@ fn test_create_snapshot_invalid_params_no_side_effects() {
             mem_file_path: Some(std::path::PathBuf::new()),
             deferred_sync: false,
             state_only: true,
+            fs_state_path: None,
         },
         // state_only=true with an incremental type.
         CreateSnapshotParams {
@@ -372,6 +377,7 @@ fn test_create_snapshot_invalid_params_no_side_effects() {
             mem_file_path: None,
             deferred_sync: false,
             state_only: true,
+            fs_state_path: None,
         },
     ];
     for params in invalid_params {
@@ -452,6 +458,7 @@ fn test_incremental_snapshot_arms_soft_dirty_window() {
                 mem_file_path: Some(incremental_memory.as_path().to_path_buf()),
                 deferred_sync: false,
                 state_only: false,
+                fs_state_path: None,
             }),
             &mut event_manager,
         )
@@ -509,6 +516,7 @@ fn test_incremental_snapshot_arms_soft_dirty_window() {
                 mem_file_path: Some(soft_dirty_memory.as_path().to_path_buf()),
                 deferred_sync: false,
                 state_only: false,
+                fs_state_path: None,
             }),
             &mut event_manager,
         )
@@ -615,11 +623,13 @@ fn verify_load_snap_disallowed_after_boot_resources(res: VmmAction, res_name: &s
         mem_backend: MemBackendConfig {
             backend_path: memory_file.as_path().to_path_buf(),
             backend_type: MemBackendType::File,
+            source_path: None,
         },
         track_dirty_pages: false,
         resume_vm: false,
         network_overrides: vec![],
         vsock_override: None,
+        fs_override: None,
         clock_realtime: false,
     });
     let err = preboot_api_controller.handle_preboot_request(req);

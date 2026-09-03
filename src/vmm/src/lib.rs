@@ -119,6 +119,7 @@ pub mod initrd;
 use std::collections::HashMap;
 use std::io;
 use std::os::unix::io::AsRawFd;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -142,6 +143,7 @@ use crate::devices::virtio::mem::{VIRTIO_MEM_DEV_ID, VirtioMemError, VirtioMemSt
 use crate::devices::virtio::net::Net;
 use crate::devices::virtio::pmem::device::Pmem;
 use crate::devices::virtio::rng::Entropy;
+use crate::devices::virtio::virtio_fs::VirtioFs;
 use crate::devices::virtio::vsock::{Vsock, VsockUnixBackend};
 use crate::logger::{METRICS, MetricsError, log_dev_preview_warning};
 use crate::mmds::data_store::Mmds;
@@ -349,6 +351,7 @@ impl Vmm {
         let mut pmem = Vec::new();
         let mut balloon = None;
         let mut vsock = None;
+        let mut fs = None;
         let mut entropy = None;
         let mut memory_hotplug = None;
         let mut mmds_ipv4_address = None;
@@ -398,6 +401,11 @@ impl Vmm {
                         memory_hotplug = Some(MemoryHotplugConfig::from(m));
                     }
                 }
+                VirtioDeviceType::Fs => {
+                    if let Some(device) = device.as_any().downcast_ref::<VirtioFs>() {
+                        fs = Some(device.config());
+                    }
+                }
             });
 
         let mmds_config = mmds_ref.map(|mmds| {
@@ -424,6 +432,7 @@ impl Vmm {
             mmds_config,
             network_interfaces: net,
             vsock,
+            fs,
             entropy,
             pmem_devices: pmem,
             // serial_config is marked serde(skip) so that it doesnt end up in snapshots
@@ -533,6 +542,75 @@ impl Vmm {
             vcpu_states,
             device_states,
         })
+    }
+
+    fn virtio_fs_device(&self) -> Option<Arc<Mutex<dyn VirtioDevice>>> {
+        let mut id = None;
+        self.device_manager
+            .for_each_virtio_device(|device_type, device| {
+                if device_type == VirtioDeviceType::Fs {
+                    id = Some(device.id().to_string());
+                }
+            });
+        id.and_then(|id| {
+            self.device_manager
+                .get_virtio_device(VirtioDeviceType::Fs, &id)
+        })
+    }
+
+    /// Return whether this microVM owns a virtio-fs device.
+    pub fn has_virtio_fs(&self) -> bool {
+        self.virtio_fs_device().is_some()
+    }
+
+    /// Quiesce virtio-fs and serialize the backend sidecar before VM state.
+    pub fn prepare_virtio_fs_snapshot(
+        &mut self,
+        path: &Path,
+        deferred_sync: bool,
+    ) -> Result<(), crate::devices::virtio::virtio_fs::VirtioFsError> {
+        let Some(device) = self.virtio_fs_device() else {
+            return Ok(());
+        };
+        device
+            .lock()
+            .expect("Poisoned lock")
+            .as_mut_any()
+            .downcast_mut::<VirtioFs>()
+            .expect("device type must match")
+            .prepare_snapshot(path, deferred_sync)
+    }
+
+    /// Re-enable the source virtio-fs backend after the snapshot attempt.
+    pub fn finish_virtio_fs_snapshot(
+        &mut self,
+        snapshot_succeeded: bool,
+    ) -> Result<(), crate::devices::virtio::virtio_fs::VirtioFsError> {
+        let Some(device) = self.virtio_fs_device() else {
+            return Ok(());
+        };
+        device
+            .lock()
+            .expect("Poisoned lock")
+            .as_mut_any()
+            .downcast_mut::<VirtioFs>()
+            .expect("device type must match")
+            .finish_snapshot(snapshot_succeeded)
+    }
+
+    /// Return the vhost-user dirty ranges captured during prepare.
+    pub fn virtio_fs_dirty_ranges(&self) -> Vec<crate::vstate::pagemap_anon::MemoryRange> {
+        let Some(device) = self.virtio_fs_device() else {
+            return Vec::new();
+        };
+        device
+            .lock()
+            .expect("Poisoned lock")
+            .as_any()
+            .downcast_ref::<VirtioFs>()
+            .expect("device type must match")
+            .snapshot_dirty_ranges()
+            .to_vec()
     }
 
     /// Dumps CPU configuration.

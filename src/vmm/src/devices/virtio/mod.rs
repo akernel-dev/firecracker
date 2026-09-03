@@ -28,6 +28,7 @@ pub mod test_utils;
 pub mod transport;
 pub mod vhost_user;
 pub mod vhost_user_metrics;
+pub mod virtio_fs;
 pub mod vsock;
 
 /// When the driver initializes the device, it lets the device know about the
@@ -67,6 +68,8 @@ pub enum ActivateError {
     QueueMemoryError(QueueError),
     /// The driver didn't acknowledge a required feature: {0}
     RequiredFeatureNotAcked(&'static str),
+    /// Virtio-fs activation failed: {0}
+    VirtioFs(virtio_fs::VirtioFsError),
 }
 
 /// Trait that helps in upcasting an object to Any

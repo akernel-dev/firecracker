@@ -31,6 +31,7 @@ use crate::vmm_config::mmds::{MmdsConfig, MmdsConfigError};
 use crate::vmm_config::net::*;
 use crate::vmm_config::pmem::{PmemBuilder, PmemConfig, PmemConfigError};
 use crate::vmm_config::serial::SerialConfig;
+use crate::vmm_config::virtio_fs::{FsConfig, FsConfigError};
 use crate::vmm_config::vsock::*;
 use crate::vstate::memory;
 use crate::vstate::memory::{GuestRegionMmap, MemoryError};
@@ -68,6 +69,8 @@ pub enum ResourcesError {
     PmemConfig(#[from] PmemConfigError),
     /// Memory hotplug config error: {0}
     MemoryHotplugConfig(#[from] MemoryHotplugConfigError),
+    /// Virtio-fs config error: {0}
+    FsConfig(#[from] FsConfigError),
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -94,6 +97,8 @@ pub struct VmmConfig {
     #[serde(default)]
     pub network_interfaces: Vec<NetworkInterfaceConfig>,
     pub vsock: Option<VsockDeviceConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fs: Option<FsConfig>,
     pub entropy: Option<EntropyDeviceConfig>,
     #[serde(default, rename = "pmem")]
     pub pmem_devices: Vec<PmemConfig>,
@@ -120,6 +125,8 @@ pub struct VmResources {
     pub net_builder: NetBuilder,
     /// The entropy device builder.
     pub entropy: EntropyDeviceBuilder,
+    /// The single virtio-fs device configuration.
+    pub fs: Option<FsConfig>,
     /// The pmem device configs.
     pub pmem: PmemBuilder,
     /// The memory hotplug configuration.
@@ -204,6 +211,10 @@ impl VmResources {
 
         if let Some(vsock_config) = vmm_config.vsock {
             resources.set_vsock_device(vsock_config)?;
+        }
+
+        if let Some(fs_config) = vmm_config.fs {
+            resources.set_fs_device(fs_config)?;
         }
 
         if let Some(balloon_config) = vmm_config.balloon {
@@ -380,6 +391,18 @@ impl VmResources {
         self.vsock.insert(config)
     }
 
+    /// Sets the single virtio-fs device to be attached when the VM starts.
+    pub fn set_fs_device(&mut self, config: FsConfig) -> Result<(), FsConfigError> {
+        config.validate()?;
+        if let Some(current) = &self.fs
+            && current.fs_id != config.fs_id
+        {
+            return Err(FsConfigError::DeviceAlreadyExists(current.fs_id.clone()));
+        }
+        self.fs = Some(config);
+        Ok(())
+    }
+
     /// Builds an entropy device to be attached when the VM starts.
     pub fn build_entropy_device(
         &mut self,
@@ -479,24 +502,25 @@ impl VmResources {
 
     /// Allocates the given guest memory regions.
     ///
-    /// If vhost-user-blk devices are in use, allocates memfd-backed shared memory, otherwise
+    /// If vhost-user devices are in use, allocates memfd-backed shared memory, otherwise
     /// prefers anonymous memory for performance reasons.
     fn allocate_memory_regions(
         &self,
         regions: &[(GuestAddress, usize)],
     ) -> Result<Vec<GuestRegionMmap>, MemoryError> {
-        let vhost_user_device_used = self
-            .block
-            .devices
-            .iter()
-            .any(|b| b.lock().expect("Poisoned lock").is_vhost_user());
+        let vhost_user_device_used = self.fs.is_some()
+            || self
+                .block
+                .devices
+                .iter()
+                .any(|b| b.lock().expect("Poisoned lock").is_vhost_user());
 
         // Page faults are more expensive for shared memory mapping, including  memfd.
         // For this reason, we only back guest memory with a memfd
-        // if a vhost-user-blk device is configured in the VM, otherwise we fall back to
+        // if a vhost-user device is configured in the VM, otherwise we fall back to
         // an anonymous private memory.
         //
-        // The vhost-user-blk branch is not currently covered by integration tests in Rust,
+        // The vhost-user branch is not currently covered by integration tests in Rust,
         // because that would require running a backend process. If in the future we converge to
         // a single way of backing guest memory for vhost-user and non-vhost-user cases,
         // that would not be worth the effort.
@@ -548,6 +572,7 @@ impl From<&VmResources> for VmmConfig {
             mmds_config: resources.mmds_config(),
             network_interfaces: resources.net_builder.configs(),
             vsock: resources.vsock.config(),
+            fs: resources.fs.clone(),
             entropy: resources.entropy.config(),
             pmem_devices: resources.pmem.configs.clone(),
             // serial_config is marked serde(skip) so that it doesnt end up in snapshots.
@@ -664,6 +689,7 @@ mod tests {
             boot_timer: false,
             mmds_size_limit: HTTP_MAX_PAYLOAD_SIZE,
             entropy: Default::default(),
+            fs: None,
             pmem: Default::default(),
             pci_enabled: false,
             serial_out_path: None,

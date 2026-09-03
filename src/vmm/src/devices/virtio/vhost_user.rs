@@ -4,13 +4,17 @@
 // Portions Copyright 2019 Intel Corporation. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::os::fd::AsRawFd;
+use std::fs::File;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::{Frontend, VhostUserFrontend};
-use vhost::{Error as VhostError, VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
+use vhost::{
+    Error as VhostError, VhostBackend, VhostUserDirtyLogRegion, VhostUserMemoryRegionInfo,
+    VringConfigData,
+};
 use vm_memory::{Address, GuestMemory, GuestMemoryError, GuestMemoryRegion};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -51,6 +55,14 @@ pub enum VhostUserError {
     VhostUserSetVringKick(VhostError),
     /// Set vring enable failed: {0}
     VhostUserSetVringEnable(VhostError),
+    /// Get vring base failed: {0}
+    VhostUserGetVringBase(VhostError),
+    /// Set dirty-log base failed: {0}
+    VhostUserSetLogBase(VhostError),
+    /// Transfer backend device state failed: {0}
+    VhostUserSetDeviceState(VhostError),
+    /// Check backend device state failed: {0}
+    VhostUserCheckDeviceState(VhostError),
     /// Failed to read vhost eventfd: No memory region found
     VhostUserNoMemoryRegion,
     /// Invalid used address
@@ -111,6 +123,18 @@ pub trait VhostUserHandleBackend: Sized {
         unimplemented!()
     }
 
+    fn get_vring_base(&self, _queue_index: usize) -> Result<u32, vhost::Error> {
+        unimplemented!()
+    }
+
+    fn set_log_base(
+        &self,
+        _base: u64,
+        _region: Option<VhostUserDirtyLogRegion>,
+    ) -> Result<(), vhost::Error> {
+        unimplemented!()
+    }
+
     /// Set the event file descriptor to signal when buffers are used.
     /// Bits (0-7) of the payload contain the vring index. Bit 8 is the invalid FD flag. This flag
     /// is set when there is no file descriptor in the ancillary data. This signals that polling
@@ -158,6 +182,19 @@ pub trait VhostUserHandleBackend: Sized {
         _flags: VhostUserConfigFlags,
         _buf: &[u8],
     ) -> Result<(), vhost::Error> {
+        unimplemented!()
+    }
+
+    fn set_device_state_fd(
+        &self,
+        _direction: VhostTransferStateDirection,
+        _phase: VhostTransferStatePhase,
+        _fd: OwnedFd,
+    ) -> Result<Option<File>, vhost::Error> {
+        unimplemented!()
+    }
+
+    fn check_device_state(&self) -> Result<(), vhost::Error> {
         unimplemented!()
     }
 }
@@ -211,6 +248,18 @@ impl VhostUserHandleBackend for Frontend {
         <Frontend as VhostBackend>::set_vring_base(self, queue_index, base)
     }
 
+    fn get_vring_base(&self, queue_index: usize) -> Result<u32, vhost::Error> {
+        <Frontend as VhostBackend>::get_vring_base(self, queue_index)
+    }
+
+    fn set_log_base(
+        &self,
+        base: u64,
+        region: Option<VhostUserDirtyLogRegion>,
+    ) -> Result<(), vhost::Error> {
+        <Frontend as VhostBackend>::set_log_base(self, base, region)
+    }
+
     /// Set the event file descriptor to signal when buffers are used.
     /// Bits (0-7) of the payload contain the vring index. Bit 8 is the invalid FD flag. This flag
     /// is set when there is no file descriptor in the ancillary data. This signals that polling
@@ -260,6 +309,19 @@ impl VhostUserHandleBackend for Frontend {
     ) -> Result<(), vhost::Error> {
         <Frontend as VhostUserFrontend>::set_config(self, offset, flags, buf)
     }
+
+    fn set_device_state_fd(
+        &self,
+        direction: VhostTransferStateDirection,
+        phase: VhostTransferStatePhase,
+        fd: OwnedFd,
+    ) -> Result<Option<File>, vhost::Error> {
+        <Frontend as VhostUserFrontend>::set_device_state_fd(self, direction, phase, fd)
+    }
+
+    fn check_device_state(&self) -> Result<(), vhost::Error> {
+        <Frontend as VhostUserFrontend>::check_device_state(self)
+    }
 }
 
 pub type VhostUserHandle = VhostUserHandleImpl<Frontend>;
@@ -301,6 +363,18 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
             .map_err(VhostUserError::VhostUserSetFeatures)
     }
 
+    /// Select whether ordinary frontend requests ask the backend for a
+    /// REPLY_ACK response. Device activation runs on a seccomp-confined vCPU
+    /// thread, so migration-capable devices enable replies only around state
+    /// transfer on the VMM thread.
+    pub fn set_reply_ack_requests(&self, enabled: bool) {
+        self.vu.set_hdr_flags(if enabled {
+            VhostUserHeaderFlag::NEED_REPLY
+        } else {
+            VhostUserHeaderFlag::empty()
+        });
+    }
+
     /// Set vhost-user protocol features to the backend.
     pub fn set_protocol_features(
         &mut self,
@@ -321,6 +395,75 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
         }
 
         Ok(())
+    }
+
+    /// Enable or disable a backend vring.
+    pub fn set_vring_enabled(
+        &mut self,
+        queue_index: usize,
+        enabled: bool,
+    ) -> Result<(), VhostUserError> {
+        self.vu
+            .set_vring_enable(queue_index, enabled)
+            .map_err(VhostUserError::VhostUserSetVringEnable)
+    }
+
+    /// Stop a vring and return the backend's next available index.
+    pub fn stop_vring(&mut self, queue_index: usize) -> Result<u32, VhostUserError> {
+        self.set_vring_enabled(queue_index, false)?;
+        self.vu
+            .get_vring_base(queue_index)
+            .map_err(VhostUserError::VhostUserGetVringBase)
+    }
+
+    /// Reinstall the state cleared by `GET_VRING_BASE` and restart a vring.
+    pub fn restart_vring(
+        &mut self,
+        queue_index: usize,
+        base: u16,
+        call_evt: &EventFd,
+        kick_evt: &EventFd,
+    ) -> Result<(), VhostUserError> {
+        self.vu
+            .set_vring_base(queue_index, base)
+            .map_err(VhostUserError::VhostUserSetVringBase)?;
+        self.vu
+            .set_vring_call(queue_index, call_evt)
+            .map_err(VhostUserError::VhostUserSetVringCall)?;
+        self.vu
+            .set_vring_kick(queue_index, kick_evt)
+            .map_err(VhostUserError::VhostUserSetVringKick)?;
+        self.set_vring_enabled(queue_index, true)
+    }
+
+    /// Install the shared dirty-log bitmap used by a vhost-user backend.
+    pub fn set_log_base(
+        &self,
+        base: u64,
+        region: VhostUserDirtyLogRegion,
+    ) -> Result<(), VhostUserError> {
+        self.vu
+            .set_log_base(base, Some(region))
+            .map_err(VhostUserError::VhostUserSetLogBase)
+    }
+
+    /// Begin saving or loading backend-internal device state.
+    pub fn set_device_state_fd(
+        &self,
+        direction: VhostTransferStateDirection,
+        fd: OwnedFd,
+    ) -> Result<(), VhostUserError> {
+        self.vu
+            .set_device_state_fd(direction, VhostTransferStatePhase::STOPPED, fd)
+            .map(|_| ())
+            .map_err(VhostUserError::VhostUserSetDeviceState)
+    }
+
+    /// Wait for an asynchronous backend state transfer and report its result.
+    pub fn check_device_state(&self) -> Result<(), VhostUserError> {
+        self.vu
+            .check_device_state()
+            .map_err(VhostUserError::VhostUserCheckDeviceState)
     }
 
     /// Negotiate virtio and protocol features with the backend.
@@ -364,7 +507,7 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
     }
 
     /// Update guest memory table to the backend.
-    fn update_mem_table(&self, mem: &GuestMemoryMmap) -> Result<(), VhostUserError> {
+    pub(crate) fn update_mem_table(&self, mem: &GuestMemoryMmap) -> Result<(), VhostUserError> {
         let mut regions: Vec<VhostUserMemoryRegionInfo> = Vec::new();
 
         for region in mem.iter() {
@@ -400,9 +543,51 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
         queues: &[(usize, &Queue, &EventFd)],
         interrupt: Arc<dyn VirtioInterrupt>,
     ) -> Result<(), VhostUserError> {
+        self.setup_backend_stopped(mem, queues, interrupt)?;
+        for (queue_index, _, _) in queues {
+            self.set_vring_enabled(*queue_index, true)?;
+        }
+        Ok(())
+    }
+
+    /// Set up and enable vrings after the caller has already installed the
+    /// backend memory table.
+    pub(crate) fn setup_backend_after_mem_table(
+        &mut self,
+        mem: &GuestMemoryMmap,
+        queues: &[(usize, &Queue, &EventFd)],
+        interrupt: Arc<dyn VirtioInterrupt>,
+    ) -> Result<(), VhostUserError> {
+        self.setup_backend_stopped_after_mem_table(mem, queues, interrupt)?;
+        for (queue_index, _, _) in queues {
+            self.set_vring_enabled(*queue_index, true)?;
+        }
+        Ok(())
+    }
+
+    /// Configure all backend vrings but leave them disabled.
+    pub fn setup_backend_stopped(
+        &mut self,
+        mem: &GuestMemoryMmap,
+        queues: &[(usize, &Queue, &EventFd)],
+        interrupt: Arc<dyn VirtioInterrupt>,
+    ) -> Result<(), VhostUserError> {
         // Provide the memory table to the backend.
         self.update_mem_table(mem)?;
 
+        self.setup_backend_stopped_after_mem_table(mem, queues, interrupt)
+    }
+
+    /// Configure vrings while preserving a memory table that the caller has
+    /// already installed. This is required when protocol state tied to the
+    /// memory regions, such as LOG_SHMFD bitmaps, was attached after
+    /// SET_MEM_TABLE and must not be discarded by replacing the regions.
+    pub(crate) fn setup_backend_stopped_after_mem_table(
+        &mut self,
+        mem: &GuestMemoryMmap,
+        queues: &[(usize, &Queue, &EventFd)],
+        interrupt: Arc<dyn VirtioInterrupt>,
+    ) -> Result<(), VhostUserError> {
         // Send set_vring_num here, since it could tell backends, like SPDK,
         // how many virt queues to be handled, which backend required to know
         // at early stage.
@@ -434,7 +619,7 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
                 .set_vring_addr(*queue_index, &config_data)
                 .map_err(VhostUserError::VhostUserSetVringAddr)?;
             self.vu
-                .set_vring_base(*queue_index, queue.avail_ring_idx_get())
+                .set_vring_base(*queue_index, queue.next_avail.0)
                 .map_err(VhostUserError::VhostUserSetVringBase)?;
 
             // No matter the queue, we set irq_evt for signaling the guest that buffers were
@@ -456,10 +641,6 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
             self.vu
                 .set_vring_kick(*queue_index, queue_evt)
                 .map_err(VhostUserError::VhostUserSetVringKick)?;
-
-            self.vu
-                .set_vring_enable(*queue_index, true)
-                .map_err(VhostUserError::VhostUserSetVringEnable)?;
         }
 
         Ok(())
@@ -562,6 +743,36 @@ pub(crate) mod tests {
         };
         vuh.set_features(0x69).unwrap();
         assert_eq!(unsafe { *vuh.vu.features.get() }, 0x69);
+    }
+
+    #[test]
+    fn test_set_reply_ack_requests() {
+        struct MockFrontend {
+            hdr_flags: std::cell::UnsafeCell<VhostUserHeaderFlag>,
+        }
+
+        impl VhostUserHandleBackend for MockFrontend {
+            fn set_hdr_flags(&self, flags: VhostUserHeaderFlag) {
+                unsafe { *self.hdr_flags.get() = flags };
+            }
+        }
+
+        let vuh = VhostUserHandleImpl {
+            vu: MockFrontend {
+                hdr_flags: std::cell::UnsafeCell::new(VhostUserHeaderFlag::empty()),
+            },
+            socket_path: String::new(),
+        };
+        vuh.set_reply_ack_requests(true);
+        assert_eq!(
+            unsafe { &*vuh.vu.hdr_flags.get() }.bits(),
+            VhostUserHeaderFlag::NEED_REPLY.bits()
+        );
+        vuh.set_reply_ack_requests(false);
+        assert_eq!(
+            unsafe { &*vuh.vu.hdr_flags.get() }.bits(),
+            VhostUserHeaderFlag::empty().bits()
+        );
     }
 
     #[test]
@@ -835,6 +1046,7 @@ pub(crate) mod tests {
 
         struct MockFrontend {
             vrings: std::cell::UnsafeCell<Vec<VringData>>,
+            mem_table_updates: std::cell::UnsafeCell<usize>,
         }
 
         impl VhostUserHandleBackend for MockFrontend {
@@ -842,6 +1054,7 @@ pub(crate) mod tests {
                 &self,
                 _regions: &[VhostUserMemoryRegionInfo],
             ) -> Result<(), vhost::Error> {
+                unsafe { *self.mem_table_updates.get() += 1 };
                 Ok(())
             }
 
@@ -896,6 +1109,7 @@ pub(crate) mod tests {
         let mut vuh = VhostUserHandleImpl {
             vu: MockFrontend {
                 vrings: std::cell::UnsafeCell::new(vec![]),
+                mem_table_updates: std::cell::UnsafeCell::new(0),
             },
             socket_path: "".to_string(),
         };
@@ -919,6 +1133,7 @@ pub(crate) mod tests {
         let interrupt = default_interrupt();
         vuh.setup_backend(&guest_memory, &queues, interrupt.clone())
             .unwrap();
+        assert_eq!(unsafe { *vuh.vu.mem_table_updates.get() }, 1);
 
         // VhostUserHandleImpl should correctly send memory and queues information to
         // the backend.
@@ -983,5 +1198,40 @@ pub(crate) mod tests {
         assert_eq!(result[0].call, expected_config.call);
         assert_eq!(result[0].kick, expected_config.kick);
         assert_eq!(result[0].enable, expected_config.enable);
+
+        // A caller that installed SET_MEM_TABLE followed by memory-bound
+        // protocol state (for example LOG_SHMFD) can configure the same
+        // vrings without replacing those backend regions.
+        unsafe { (*vuh.vu.vrings.get()).clear() };
+        vuh.setup_backend_after_mem_table(&guest_memory, &queues, interrupt.clone())
+            .unwrap();
+        assert_eq!(unsafe { *vuh.vu.mem_table_updates.get() }, 1);
+        assert_eq!(unsafe { &*vuh.vu.vrings.get() }.len(), 1);
+
+        // GET_VRING_BASE stops the ring and clears call/kick in a real
+        // backend. Restart must therefore reinstall more than the enable bit.
+        {
+            let result = unsafe { &mut *vuh.vu.vrings.get() };
+            result[0].base = 0;
+            result[0].call = -1;
+            result[0].kick = -1;
+            result[0].enable = false;
+        }
+        let restart_base = 37;
+        vuh.restart_vring(
+            0,
+            restart_base,
+            interrupt
+                .notifier(VirtioInterruptType::Queue(0u16))
+                .as_ref()
+                .unwrap(),
+            &event_fd,
+        )
+        .unwrap();
+        let result = unsafe { &*vuh.vu.vrings.get() };
+        assert_eq!(result[0].base, restart_base);
+        assert_eq!(result[0].call, expected_config.call);
+        assert_eq!(result[0].kick, expected_config.kick);
+        assert!(result[0].enable);
     }
 }

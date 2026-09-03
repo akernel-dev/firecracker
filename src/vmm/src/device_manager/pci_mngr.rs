@@ -419,6 +419,9 @@ impl<'a> Persist<'a> for PciDevices {
                         transport_state,
                     })
                 }
+                VirtioDeviceType::Fs => {
+                    unreachable!("virtio-fs is rejected when PCI transport is enabled")
+                }
             }
         }
 

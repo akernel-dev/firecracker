@@ -41,6 +41,9 @@ pub enum SnapshotType {
 pub enum MemBackendType {
     /// Guest memory contents will be loaded from a file.
     File,
+    /// Reflink-clone `source_path` to `backend_path`, then map only the
+    /// new live-memory file writable and shared.
+    SharedFile,
     /// Guest memory will be served through UFFD by a separate process.
     Uffd,
 }
@@ -74,6 +77,9 @@ pub struct CreateSnapshotParams {
     /// durably written.
     #[serde(default)]
     pub deferred_sync: bool,
+    /// Path where virtiofsd writes its migration sidecar. Required when
+    /// the microVM has a virtio-fs device.
+    pub fs_state_path: Option<PathBuf>,
 }
 
 /// Allows for changing the mapping between tap devices and host devices
@@ -93,6 +99,18 @@ pub struct VsockOverride {
     pub uds_path: String,
 }
 
+/// Reconnects a restored virtio-fs device to a replacement virtiofsd.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsOverride {
+    /// Identifier of the snapshotted filesystem device.
+    pub fs_id: String,
+    /// New vhost-user socket path.
+    pub socket_path: String,
+    /// Path to the virtiofsd migration-state sidecar.
+    pub state_path: PathBuf,
+}
+
 /// Stores the configuration that will be used for loading a snapshot.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LoadSnapshotParams {
@@ -110,6 +128,8 @@ pub struct LoadSnapshotParams {
     pub network_overrides: Vec<NetworkOverride>,
     /// When set, the vsock backend UDS path will be overridden
     pub vsock_override: Option<VsockOverride>,
+    /// Virtio-fs socket and backend-state override.
+    pub fs_override: Option<FsOverride>,
     /// [x86_64 only] When set to true, passes `KVM_CLOCK_REALTIME` to `KVM_SET_CLOCK` on restore,
     /// advancing kvmclock by the wall-clock time elapsed since the snapshot was taken. When false
     /// (default), kvmclock resumes from where it was at snapshot time.
@@ -146,6 +166,9 @@ pub struct LoadSnapshotConfig {
     /// Whether or not to override the vsock backend UDS path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vsock_override: Option<VsockOverride>,
+    /// Virtio-fs socket and backend-state override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fs_override: Option<FsOverride>,
     /// [x86_64 only] When set to true, passes `KVM_CLOCK_REALTIME` to `KVM_SET_CLOCK` on restore.
     #[serde(default)]
     pub clock_realtime: bool,
@@ -159,6 +182,9 @@ pub struct MemBackendConfig {
     pub backend_path: PathBuf,
     /// Specifies the guest memory backend type.
     pub backend_type: MemBackendType,
+    /// Immutable checkpoint memory source. Required only for SharedFile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<PathBuf>,
 }
 
 /// The microVM state options.

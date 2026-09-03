@@ -36,6 +36,7 @@ use crate::devices::virtio::mem::{VIRTIO_MEM_DEFAULT_SLOT_SIZE_MIB, VirtioMem};
 use crate::devices::virtio::net::Net;
 use crate::devices::virtio::pmem::device::Pmem;
 use crate::devices::virtio::rng::Entropy;
+use crate::devices::virtio::virtio_fs::VirtioFs;
 use crate::devices::virtio::vsock::{Vsock, VsockUnixBackend};
 #[cfg(feature = "gdb")]
 use crate::gdb;
@@ -227,6 +228,16 @@ pub fn build_microvm_for_boot(
             &vm,
             &mut boot_cmdline,
             balloon,
+            event_manager,
+        )?;
+    }
+
+    if let Some(fs_config) = &vm_resources.fs {
+        attach_fs_device(
+            &mut device_manager,
+            &vm,
+            &mut boot_cmdline,
+            fs_config,
             event_manager,
         )?;
     }
@@ -620,6 +631,35 @@ fn attach_entropy_device(
         cmdline,
         event_manager,
         false,
+    )
+}
+
+fn attach_fs_device(
+    device_manager: &mut DeviceManager,
+    vm: &Vm,
+    cmdline: &mut LoaderKernelCmdline,
+    config: &crate::vmm_config::virtio_fs::FsConfig,
+    event_manager: &mut EventManager,
+) -> Result<(), AttachDeviceError> {
+    if device_manager.is_pci_enabled() {
+        return Err(AttachDeviceError::VirtioFsRequiresMmio);
+    }
+
+    let mut fs = VirtioFs::new(config.clone())?;
+    fs.prepare_dirty_log(
+        vm.as_kvm()
+            .ok_or(AttachDeviceError::NotSupported)?
+            .guest_memory(),
+    )?;
+    let device = Arc::new(Mutex::new(fs));
+    event_manager.add_subscriber(device.clone());
+    device_manager.attach_virtio_device(
+        vm,
+        config.fs_id.clone(),
+        device,
+        cmdline,
+        event_manager,
+        true,
     )
 }
 

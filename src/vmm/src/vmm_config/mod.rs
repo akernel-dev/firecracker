@@ -37,6 +37,8 @@ pub mod pmem;
 /// Wrapper for configuring microVM snapshots and the microVM state.
 pub mod serial;
 pub mod snapshot;
+/// Wrapper for configuring a virtio-fs device attached to the microVM.
+pub mod virtio_fs;
 /// Wrapper for configuring the vsock devices attached to the microVM.
 pub mod vsock;
 
