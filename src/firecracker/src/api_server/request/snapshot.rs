@@ -136,9 +136,24 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
                 // either `mem_file_path` or `mem_backend` field is always specified.
                 backend_path: snapshot_config.mem_file_path.unwrap(),
                 backend_type: MemBackendType::File,
+                source_path: None,
             }
         }
     };
+
+    match (&mem_backend.backend_type, &mem_backend.source_path) {
+        (MemBackendType::SharedFile, None) => {
+            return Err(RequestError::SerdeJson(serde_json::Error::custom(
+                "mem_backend.source_path is required for SharedFile",
+            )));
+        }
+        (MemBackendType::File | MemBackendType::Uffd, Some(_)) => {
+            return Err(RequestError::SerdeJson(serde_json::Error::custom(
+                "mem_backend.source_path is allowed only for SharedFile",
+            )));
+        }
+        _ => {}
+    }
 
     let snapshot_params = LoadSnapshotParams {
         snapshot_path: snapshot_config.snapshot_path,
@@ -149,6 +164,7 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
         resume_vm: snapshot_config.resume_vm,
         network_overrides: snapshot_config.network_overrides,
         vsock_override: snapshot_config.vsock_override,
+        fs_override: snapshot_config.fs_override,
         clock_realtime: snapshot_config.clock_realtime,
         huge_pages: snapshot_config.huge_pages,
     };
@@ -191,6 +207,7 @@ mod tests {
             state_only: false,
             deferred_sync: false,
             sync_snapshot_files: true,
+            fs_state_path: None,
         };
         assert_eq!(
             vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
@@ -210,6 +227,7 @@ mod tests {
             state_only: false,
             deferred_sync: false,
             sync_snapshot_files: false,
+            fs_state_path: None,
         };
         assert_eq!(
             vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
@@ -227,6 +245,7 @@ mod tests {
             state_only: false,
             deferred_sync: false,
             sync_snapshot_files: true,
+            fs_state_path: None,
         };
         assert_eq!(
             vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
@@ -266,6 +285,7 @@ mod tests {
             mem_file_path: None,
             state_only: true,
             deferred_sync: false,
+            fs_state_path: None,
         };
         assert_eq!(
             vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
@@ -285,6 +305,7 @@ mod tests {
             mem_file_path: Some(PathBuf::from("bar")),
             state_only: false,
             deferred_sync: true,
+            fs_state_path: None,
         };
         assert_eq!(
             vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
@@ -304,11 +325,13 @@ mod tests {
             mem_backend: MemBackendConfig {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::File,
+                source_path: None,
             },
             track_dirty_pages: false,
             resume_vm: false,
             network_overrides: vec![],
             vsock_override: None,
+            fs_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Hugetlbfs2M,
         };
@@ -337,11 +360,13 @@ mod tests {
             mem_backend: MemBackendConfig {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::File,
+                source_path: None,
             },
             track_dirty_pages: true,
             resume_vm: false,
             network_overrides: vec![],
             vsock_override: None,
+            fs_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
         };
@@ -371,11 +396,13 @@ mod tests {
             mem_backend: MemBackendConfig {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::Uffd,
+                source_path: None,
             },
             track_dirty_pages: false,
             resume_vm: true,
             network_overrides: vec![],
             vsock_override: None,
+            fs_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
         };
@@ -410,6 +437,7 @@ mod tests {
             mem_backend: MemBackendConfig {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::Uffd,
+                source_path: None,
             },
             track_dirty_pages: false,
             resume_vm: true,
@@ -418,6 +446,7 @@ mod tests {
                 host_dev_name: String::from("vmtap2"),
             }],
             vsock_override: None,
+            fs_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
         };
@@ -443,11 +472,13 @@ mod tests {
             mem_backend: MemBackendConfig {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::File,
+                source_path: None,
             },
             track_dirty_pages: false,
             resume_vm: true,
             network_overrides: vec![],
             vsock_override: None,
+            fs_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
         };

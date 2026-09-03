@@ -286,6 +286,7 @@ mod tests {
                 state_only: false,
                 deferred_sync: false,
                 sync_snapshot_files: true,
+                fs_state_path: None,
             })),
             start_time_us,
         );
@@ -302,6 +303,7 @@ mod tests {
                 state_only: false,
                 deferred_sync: false,
                 sync_snapshot_files: true,
+                fs_state_path: None,
             })),
             start_time_us,
         );

@@ -47,6 +47,8 @@ done
     fail "${release_tag} does not extend Firecracker v${FIRECRACKER_VERSION}"
 [ "$(uname -m)" = "x86_64" ] ||
     fail "only x86_64 AKernel bundles are currently supported"
+[ -z "$(git -C "${ROOT_DIR}" status --porcelain --untracked-files=no)" ] ||
+    fail "tracked source changes must be committed before building a bundle"
 
 for command_name in cargo curl file gcc gzip jq make sha256sum tar; do
     command -v "${command_name}" >/dev/null 2>&1 ||
@@ -115,6 +117,7 @@ required_kernel_config=(
     CONFIG_EROFS_FS_SECURITY=y
     CONFIG_EROFS_FS_ZIP=y
     CONFIG_EXT4_FS=y
+    CONFIG_FUSE_FS=y
     CONFIG_OVERLAY_FS=y
     CONFIG_NF_TABLES_INET=y
     CONFIG_NF_TABLES_IPV6=y
@@ -128,6 +131,7 @@ required_kernel_config=(
     CONFIG_NFT_REJECT_IPV6=y
     CONFIG_USER_NS=y
     CONFIG_VIRTIO_BLK=y
+    CONFIG_VIRTIO_FS=y
     CONFIG_VIRTIO_NET=y
     CONFIG_VIRTIO_VSOCKETS=y
 )
@@ -137,6 +141,8 @@ for config_value in "${required_kernel_config[@]}"; do
 done
 grep -qx '# CONFIG_EROFS_FS_ZIP_LZMA is not set' .config ||
     fail "resolved kernel config unexpectedly enables EROFS LZMA"
+grep -qx '# CONFIG_FUSE_DAX is not set' .config ||
+    fail "resolved kernel config unexpectedly enables FUSE DAX"
 
 SOURCE_DATE_EPOCH=0 \
 KBUILD_BUILD_TIMESTAMP='Thu Jan  1 00:00:00 UTC 1970' \

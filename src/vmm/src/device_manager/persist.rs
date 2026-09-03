@@ -32,6 +32,8 @@ use crate::devices::virtio::pmem::persist::{PmemConstructorArgs, PmemState};
 use crate::devices::virtio::rng::Entropy;
 use crate::devices::virtio::rng::persist::{EntropyConstructorArgs, EntropyState};
 use crate::devices::virtio::transport::mmio::{IrqTrigger, MmioTransport};
+use crate::devices::virtio::virtio_fs::VirtioFs;
+use crate::devices::virtio::virtio_fs::persist::{VirtioFsConstructorArgs, VirtioFsState};
 use crate::devices::virtio::vsock::persist::{
     VsockConstructorArgs, VsockState, VsockUdsConstructorArgs,
 };
@@ -129,6 +131,9 @@ pub struct DeviceStates {
     pub pmem_devices: Vec<VirtioDeviceState<PmemState>>,
     /// Memory device state.
     pub memory_device: Option<VirtioDeviceState<VirtioMemState>>,
+    /// Virtio-fs device state.
+    #[serde(default)]
+    pub fs_device: Option<VirtioDeviceState<VirtioFsState>>,
 }
 
 pub struct MMIODevManagerConstructorArgs<'a> {
@@ -391,6 +396,18 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
                         device_info,
                     });
                 }
+                VirtioDeviceType::Fs => {
+                    let fs = locked_device
+                        .as_mut_any()
+                        .downcast_mut::<VirtioFs>()
+                        .unwrap();
+                    states.fs_device = Some(VirtioDeviceState {
+                        device_id,
+                        device_state: fs.save(),
+                        transport_state,
+                        device_info,
+                    });
+                }
             };
 
             Ok(())
@@ -636,6 +653,24 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
             )?;
         }
 
+        if let Some(fs_state) = &state.fs_device {
+            let device = Arc::new(Mutex::new(VirtioFs::restore(
+                VirtioFsConstructorArgs { mem: mem.clone() },
+                &fs_state.device_state,
+            )?));
+            constructor_args.vm_resources.fs = Some(fs_state.device_state.config.clone());
+
+            restore_helper(
+                device,
+                fs_state.device_state.virtio_state.activated,
+                true,
+                &fs_state.device_id,
+                &fs_state.transport_state,
+                &fs_state.device_info,
+                constructor_args.event_manager,
+            )?;
+        }
+
         Ok(dev_manager)
     }
 }
@@ -671,6 +706,7 @@ mod tests {
                 && self.vsock_device == other.vsock_device
                 && self.entropy_device == other.entropy_device
                 && self.memory_device == other.memory_device
+                && self.fs_device == other.fs_device
         }
     }
 

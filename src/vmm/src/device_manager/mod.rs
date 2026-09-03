@@ -46,6 +46,10 @@ use crate::devices::virtio::net::persist::NetPersistError;
 use crate::devices::virtio::pmem::device::Pmem;
 use crate::devices::virtio::pmem::persist::PmemPersistError;
 use crate::devices::virtio::rng::persist::EntropyPersistError;
+use crate::devices::virtio::transport::mmio::{IrqTrigger, MmioTransport};
+use crate::devices::virtio::transport::pci::device::CAPABILITY_BAR_SIZE;
+use crate::devices::virtio::virtio_fs::VirtioFsError;
+use crate::devices::virtio::virtio_fs::persist::VirtioFsPersistError;
 use crate::devices::virtio::vsock::{VsockError, VsockUnixBackendError};
 use crate::logger::{error, info};
 use crate::rate_limiter::TokenBucket;
@@ -106,6 +110,10 @@ pub enum AttachDeviceError {
     PciTransport(#[from] PciManagerError),
     /// Operation not supported on this VM type
     NotSupported,
+    /// Failed to create virtio-fs device: {0}
+    CreateVirtioFs(#[from] VirtioFsError),
+    /// Virtio-fs is supported only with the MMIO transport.
+    VirtioFsRequiresMmio,
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -645,6 +653,8 @@ pub enum DevicePersistError {
     Pmem(#[from] PmemPersistError),
     /// virtio-mem: {0}
     VirtioMem(#[from] VirtioMemPersistError),
+    /// virtio-fs: {0}
+    VirtioFs(#[from] VirtioFsPersistError),
     /// Could not activate device: {0}
     DeviceActivation(#[from] ActivateError),
     /// Resource allocator error: {0}
