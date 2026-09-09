@@ -1318,9 +1318,10 @@ definitions:
         type: string
         description:
           Type of the IO engine used by the device. "Async" is supported on
-          host kernels newer than 5.10.51.
+          host kernels newer than 5.10.51. Direct variants additionally require a backing filesystem
+          that reports STATX_DIOALIGN and an image length satisfying its alignment.
           This field is optional for virtio-block config and should be omitted for vhost-user-block configuration.
-        enum: ["Sync", "Async"]
+        enum: ["Sync", "Async", "SyncDirect", "AsyncDirect"]
         default: "Sync"
 
       # VhostUserBlock specific parameters

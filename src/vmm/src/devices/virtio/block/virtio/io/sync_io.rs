@@ -1,6 +1,7 @@
 // Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::direct_io::DirectIo;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 
@@ -10,6 +11,8 @@ use crate::vstate::memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum SyncIoError {
+    /// Direct I/O: {0}
+    Direct(std::io::Error),
     /// Flush: {0}
     Flush(std::io::Error),
     /// Seek: {0}
@@ -23,6 +26,7 @@ pub enum SyncIoError {
 #[derive(Debug)]
 pub struct SyncFileEngine {
     file: File,
+    direct: Option<DirectIo>,
 }
 
 // SAFETY: `File` is send and ultimately a POD.
@@ -30,7 +34,12 @@ unsafe impl Send for SyncFileEngine {}
 
 impl SyncFileEngine {
     pub fn from_file(file: File) -> SyncFileEngine {
-        SyncFileEngine { file }
+        SyncFileEngine { file, direct: None }
+    }
+
+    pub fn from_direct_file(file: File) -> Result<Self, SyncIoError> {
+        let direct = Some(DirectIo::new(&file).map_err(SyncIoError::Direct)?);
+        Ok(Self { file, direct })
     }
 
     #[cfg(test)]
@@ -39,8 +48,15 @@ impl SyncFileEngine {
     }
 
     /// Update the backing file of the engine
-    pub fn update_file(&mut self, file: File) {
-        self.file = file
+    pub fn update_file(&mut self, file: File) -> Result<(), SyncIoError> {
+        let direct = self
+            .direct
+            .map(|_| DirectIo::new(&file))
+            .transpose()
+            .map_err(SyncIoError::Direct)?;
+        self.file = file;
+        self.direct = direct;
+        Ok(())
     }
 
     pub fn read(
@@ -50,6 +66,11 @@ impl SyncFileEngine {
         addr: GuestAddress,
         count: u32,
     ) -> Result<u32, SyncIoError> {
+        if let Some(direct) = self.direct {
+            return direct
+                .transfer(&self.file, offset, mem, addr, count, false)
+                .map_err(SyncIoError::Direct);
+        }
         self.file
             .seek(SeekFrom::Start(offset))
             .map_err(SyncIoError::Seek)?;
@@ -66,6 +87,11 @@ impl SyncFileEngine {
         addr: GuestAddress,
         count: u32,
     ) -> Result<u32, SyncIoError> {
+        if let Some(direct) = self.direct {
+            return direct
+                .transfer(&self.file, offset, mem, addr, count, true)
+                .map_err(SyncIoError::Direct);
+        }
         self.file
             .seek(SeekFrom::Start(offset))
             .map_err(SyncIoError::Seek)?;

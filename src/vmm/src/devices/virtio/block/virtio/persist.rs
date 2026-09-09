@@ -29,6 +29,10 @@ pub enum FileEngineTypeState {
     Sync,
     /// Async File Engine.
     Async,
+    /// Experimental synchronous direct I/O.
+    SyncDirect,
+    /// Experimental asynchronous direct I/O.
+    AsyncDirect,
 }
 
 impl From<FileEngineType> for FileEngineTypeState {
@@ -36,6 +40,8 @@ impl From<FileEngineType> for FileEngineTypeState {
         match file_engine_type {
             FileEngineType::Sync => FileEngineTypeState::Sync,
             FileEngineType::Async => FileEngineTypeState::Async,
+            FileEngineType::SyncDirect => FileEngineTypeState::SyncDirect,
+            FileEngineType::AsyncDirect => FileEngineTypeState::AsyncDirect,
         }
     }
 }
@@ -45,6 +51,8 @@ impl From<FileEngineTypeState> for FileEngineType {
         match file_engine_type_state {
             FileEngineTypeState::Sync => FileEngineType::Sync,
             FileEngineTypeState::Async => FileEngineType::Async,
+            FileEngineTypeState::SyncDirect => FileEngineType::SyncDirect,
+            FileEngineTypeState::AsyncDirect => FileEngineType::AsyncDirect,
         }
     }
 }

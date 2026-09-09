@@ -232,6 +232,20 @@ impl<T: Debug> IoUring<T> {
         self.do_submit(self.num_ops)
     }
 
+    /// Preserve request-owned buffers if shutdown could not wait for I/O.
+    /// Used only while destroying the ring after a failed drain. Leaking these
+    /// bounded allocations is safer than freeing memory the kernel may still use.
+    pub fn abandon_user_data(&mut self) {
+        for data in self.slab.drain() {
+            std::mem::forget(data);
+        }
+    }
+
+    /// Whether no queued, in-flight, or unconsumed requests remain.
+    pub fn is_empty(&self) -> bool {
+        self.num_ops == 0
+    }
+
     /// Return the number of operations currently on the submission queue.
     pub fn pending_sqes(&self) -> Result<u32, IoUringError> {
         self.squeue.pending().map_err(IoUringError::SQueue)

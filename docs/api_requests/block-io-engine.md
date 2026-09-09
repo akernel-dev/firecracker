@@ -17,10 +17,12 @@ throughput by taking better advantage of the block device hardware, which
 typically supports queue depths greater than 1.
 
 The block IO engine is configured via the PUT /drives API call (pre-boot only),
-with the `io_engine` field taking two possible values:
+with the `io_engine` field taking four possible values:
 
 - `Sync` (default)
 - `Async` (in [developer preview](../RELEASE_POLICY.md))
+- `SyncDirect`: synchronous host Direct I/O
+- `AsyncDirect`: io_uring host Direct I/O
 
 The `Sync` variant is the default, in order to provide backwards compatibility
 with older Firecracker versions.
@@ -29,6 +31,14 @@ with older Firecracker versions.
 >
 > [vhost-user block device](./block-vhost-user.md) is another option for block
 > IO that requires an external backend process.
+
+## Direct I/O alignment and completion
+
+The direct engines open the backing file with `O_DIRECT` and query its buffer and offset alignment using `statx(STATX_DIOALIGN)`. The filesystem must report supported alignment, and the image length must be a multiple of the offset alignment. Unsupported configurations fail explicitly; no buffered fallback is performed. Direct I/O does not imply durable writes: retain the appropriate cache policy and guest flush requests for durability.
+
+Aligned `AsyncDirect` requests use guest buffers directly. Requests with unaligned guest buffers use owned, aligned bounce buffers of at most 64 KiB per pending request; reads are copied into guest memory and marked dirty before their completion is reported. Queue capacity bounds aggregate bounce memory. Larger unaligned-buffer requests use one reusable 64 KiB buffer on a serialized path. Requests covering partial host blocks also use that path: earlier I/O is drained before a read-modify-write, neighboring bytes are preserved, and later requests are submitted only after the operation finishes. These exceptional operations can block the VMM event loop. Writable images must be private to the device; external concurrent writers are not coordinated by this adapter.
+
+Async flush requests wait for preceding I/O. Snapshot preparation drains I/O and processes read completions before recording device and guest-memory state. The direct engine selection is preserved on snapshot restore and backing-file replacement; alignment is re-queried for the new file. An engine cannot replace a backing file while completion records remain unconsumed.
 
 ## Example configuration
 
