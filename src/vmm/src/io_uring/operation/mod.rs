@@ -113,6 +113,12 @@ impl<T: Debug> Operation<T> {
         }
     }
 
+    /// Wait for earlier operations before executing this request.
+    pub fn drained(mut self) -> Self {
+        self.flags |= 1 << io_uring_sqe_flags_bit::IOSQE_IO_DRAIN_BIT;
+        self
+    }
+
     pub(crate) fn fd(&self) -> FixedFd {
         self.fd
     }

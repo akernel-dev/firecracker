@@ -36,6 +36,14 @@
                 "comment": "Used by the VirtIO net device to write to tap"
             },
             {
+                "syscall": "statx",
+                "comment": "Query backing-file direct I/O alignment"
+            },
+            {
+                "syscall": "pread64",
+                "comment": "Read aligned blocks for direct I/O adaptation"
+            },
+            {
                 "syscall": "pwrite64",
                 "comment": "Used by the incremental snapshot in-place memory write path"
             },
