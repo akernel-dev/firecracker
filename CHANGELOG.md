@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added opt-in `SyncDirect` and `AsyncDirect` block I/O engines with bounded alignment adaptation for private images. Direct engine selection is preserved across disk updates and snapshots.
+
+### Fixed
+
+- Async block flushes now wait for earlier I/O submissions before executing fsync.
+
 ## [1.16.1]
 
 ### Fixed

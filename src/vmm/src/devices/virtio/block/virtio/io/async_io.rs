@@ -6,7 +6,8 @@ use std::fs::File;
 use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
 
-use vm_memory::GuestMemoryError;
+use super::direct_io::{AlignedBuffer, DirectIo};
+use vm_memory::{Bytes, GuestMemoryError};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::devices::virtio::block::virtio::io::RequestError;
@@ -36,6 +37,7 @@ pub enum AsyncIoError {
 #[derive(Debug)]
 pub struct AsyncFileEngine {
     file: File,
+    pub(super) direct: Option<DirectIo>,
     ring: IoUring<WrappedRequest>,
     completion_evt: EventFd,
 }
@@ -43,27 +45,25 @@ pub struct AsyncFileEngine {
 #[derive(Debug)]
 pub struct WrappedRequest {
     addr: Option<GuestAddress>,
+    bounce: Option<AlignedBuffer>,
     req: PendingRequest,
 }
 
 impl WrappedRequest {
     fn new(req: PendingRequest) -> Self {
-        WrappedRequest { addr: None, req }
+        WrappedRequest {
+            addr: None,
+            bounce: None,
+            req,
+        }
     }
 
     fn new_with_dirty_tracking(addr: GuestAddress, req: PendingRequest) -> Self {
         WrappedRequest {
             addr: Some(addr),
+            bounce: None,
             req,
         }
-    }
-
-    fn mark_dirty_mem_and_unwrap(self, mem: &GuestMemoryMmap, count: u32) -> PendingRequest {
-        if let Some(addr) = self.addr {
-            mem.mark_dirty(addr, count as usize)
-        }
-
-        self.req
     }
 }
 
@@ -78,6 +78,7 @@ impl AsyncFileEngine {
             vec![
                 // Make sure we only allow operations on pre-registered fds.
                 Restriction::RequireFixedFds,
+                Restriction::AllowFixedFdsAndDrain,
                 // Allowlist of opcodes.
                 Restriction::AllowOpCode(OpCode::Read),
                 Restriction::AllowOpCode(OpCode::Write),
@@ -96,16 +97,84 @@ impl AsyncFileEngine {
 
         Ok(AsyncFileEngine {
             file,
+            direct: None,
             ring,
             completion_evt,
         })
     }
 
+    pub fn from_direct_file(file: File) -> Result<Self, AsyncIoError> {
+        let direct = DirectIo::new(&file).map_err(AsyncIoError::IO)?;
+        let mut engine = Self::from_file(file)?;
+        engine.direct = Some(direct);
+        Ok(engine)
+    }
+
+    pub(super) fn transfer_serialized(
+        &mut self,
+        offset: u64,
+        mem: &GuestMemoryMmap,
+        addr: GuestAddress,
+        count: u32,
+        write: bool,
+    ) -> Result<u32, AsyncIoError> {
+        // Complete every earlier write before a partial-block read-modify-write.
+        // Keep CQEs for the normal completion path (including bounced reads).
+        self.drain(false)?;
+        self.direct
+            .unwrap()
+            .transfer(&self.file, offset, mem, addr, count, write)
+            .map_err(AsyncIoError::IO)
+    }
+
+    fn prepare_buffer(
+        &self,
+        offset: u64,
+        mem: &GuestMemoryMmap,
+        addr: GuestAddress,
+        count: u32,
+        ptr: *mut u8,
+        read: bool,
+    ) -> Result<Option<AlignedBuffer>, AsyncIoError> {
+        let Some(direct) = self.direct else {
+            return Ok(None);
+        };
+        direct.validate(offset, count).map_err(AsyncIoError::IO)?;
+        if !direct.range_aligned(offset, count) {
+            return Err(AsyncIoError::IO(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "partial host block must use serialized direct I/O",
+            )));
+        }
+        if count == 0 || direct.buffer_aligned(ptr) {
+            return Ok(None);
+        }
+        let mut bounce = AlignedBuffer::new(count as usize, direct.memory_alignment)
+            .map_err(AsyncIoError::IO)?;
+        if !read {
+            mem.read_slice(bounce.as_mut_slice(), addr)
+                .map_err(AsyncIoError::GuestMemory)?;
+        }
+        Ok(Some(bounce))
+    }
+
     pub fn update_file(&mut self, file: File) -> Result<(), AsyncIoError> {
+        if !self.ring.is_empty() {
+            return Err(AsyncIoError::IO(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "drain and consume requests before replacing the backing file",
+            )));
+        }
+        let direct = self
+            .direct
+            .map(|_| DirectIo::new(&file))
+            .transpose()
+            .map_err(AsyncIoError::IO)?;
         let ring = Self::new_ring(&file, self.completion_evt.as_raw_fd())
             .map_err(AsyncIoError::IoUring)?;
 
         self.file = file;
+        self.direct = direct;
         self.ring = ring;
         Ok(())
     }
@@ -137,7 +206,13 @@ impl AsyncFileEngine {
             }
         };
 
-        let wrapped_user_data = WrappedRequest::new_with_dirty_tracking(addr, req);
+        let bounce = match self.prepare_buffer(offset, mem, addr, count, buf, true) {
+            Ok(bounce) => bounce,
+            Err(error) => return Err(RequestError { req, error }),
+        };
+        let buf = bounce.as_ref().map_or(buf, AlignedBuffer::as_ptr);
+        let mut wrapped_user_data = WrappedRequest::new_with_dirty_tracking(addr, req);
+        wrapped_user_data.bounce = bounce;
 
         self.ring
             .push(Operation::read(
@@ -171,7 +246,13 @@ impl AsyncFileEngine {
             }
         };
 
-        let wrapped_user_data = WrappedRequest::new(req);
+        let bounce = match self.prepare_buffer(offset, mem, addr, count, buf, false) {
+            Ok(bounce) => bounce,
+            Err(error) => return Err(RequestError { req, error }),
+        };
+        let buf = bounce.as_ref().map_or(buf, AlignedBuffer::as_ptr);
+        let mut wrapped_user_data = WrappedRequest::new(req);
+        wrapped_user_data.bounce = bounce;
 
         self.ring
             .push(Operation::write(
@@ -191,7 +272,7 @@ impl AsyncFileEngine {
         let wrapped_user_data = WrappedRequest::new(req);
 
         self.ring
-            .push(Operation::fsync(0, wrapped_user_data))
+            .push(Operation::fsync(0, wrapped_user_data).drained())
             .map_err(|(io_uring_error, data)| RequestError {
                 req: data.req,
                 error: AsyncIoError::IoUring(io_uring_error),
@@ -240,11 +321,40 @@ impl AsyncFileEngine {
     ) -> Result<Option<Cqe<PendingRequest>>, AsyncIoError> {
         let cqe = self.do_pop()?.map(|cqe| {
             let count = cqe.count();
-            cqe.map_user_data(|wrapped_user_data| {
-                wrapped_user_data.mark_dirty_mem_and_unwrap(mem, count)
-            })
+            let mut copy_failed = false;
+            let mapped = cqe.map_user_data(|wrapped| {
+                if let Some(addr) = wrapped.addr {
+                    if let Some(bounce) = wrapped.bounce.as_ref() {
+                        copy_failed = count as usize > bounce.as_slice().len()
+                            || mem
+                                .write_slice(
+                                    &bounce.as_slice()
+                                        [..(count as usize).min(bounce.as_slice().len())],
+                                    addr,
+                                )
+                                .is_err();
+                    }
+                    mem.mark_dirty(addr, count as usize);
+                }
+                wrapped.req
+            });
+            if copy_failed {
+                Cqe::new(-libc::EFAULT, mapped.user_data())
+            } else {
+                mapped
+            }
         });
 
         Ok(cqe)
+    }
+}
+
+impl Drop for AsyncFileEngine {
+    fn drop(&mut self) {
+        // The kernel must finish using owned bounce buffers before they are freed.
+        // Block::drop normally already drains the device.
+        if self.drain(true).is_err() {
+            self.ring.abandon_user_data();
+        }
     }
 }

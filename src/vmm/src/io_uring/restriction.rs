@@ -24,6 +24,8 @@ pub enum Restriction {
     AllowOpCode(OpCode),
     /// Only allow operations on pre-registered fds.
     RequireFixedFds,
+    /// Permit fixed-file and ordered-drain flags, retaining RequireFixedFds.
+    AllowFixedFdsAndDrain,
 }
 
 impl From<&Restriction> for io_uring_restriction {
@@ -39,6 +41,15 @@ impl From<&Restriction> for io_uring_restriction {
                     u16::try_from(io_uring_register_restriction_op::IORING_RESTRICTION_SQE_OP)
                         .unwrap();
                 instance.__bindgen_anon_1.sqe_op = *opcode as u8;
+            }
+            AllowFixedFdsAndDrain => {
+                instance.opcode = u16::try_from(
+                    io_uring_register_restriction_op::IORING_RESTRICTION_SQE_FLAGS_ALLOWED,
+                )
+                .unwrap();
+                instance.__bindgen_anon_1.sqe_flags = (1
+                    << io_uring_sqe_flags_bit::IOSQE_FIXED_FILE_BIT)
+                    | (1 << io_uring_sqe_flags_bit::IOSQE_IO_DRAIN_BIT);
             }
             RequireFixedFds => {
                 instance.opcode = u16::try_from(

@@ -11,6 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
 use std::ops::Deref;
 use std::os::linux::fs::MetadataExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -49,6 +50,10 @@ pub enum FileEngineType {
     /// Use a Sync engine, based on blocking system calls.
     #[default]
     Sync,
+    /// Synchronous direct I/O with bounded alignment adaptation.
+    SyncDirect,
+    /// io_uring direct I/O with bounded alignment adaptation.
+    AsyncDirect,
 }
 
 /// Helper object for setting up all `Block` fields derived from its backing file.
@@ -56,16 +61,31 @@ pub enum FileEngineType {
 pub struct DiskProperties {
     pub file_path: String,
     pub file_engine: FileEngine,
+    pub engine_type: FileEngineType,
     pub nsectors: u64,
     pub image_id: [u8; VIRTIO_BLK_ID_BYTES as usize],
 }
 
 impl DiskProperties {
     // Helper function that opens the file with the proper access permissions
-    fn open_file(disk_image_path: &str, is_disk_read_only: bool) -> Result<File, VirtioBlockError> {
+    fn open_file(
+        disk_image_path: &str,
+        is_disk_read_only: bool,
+        engine_type: FileEngineType,
+    ) -> Result<File, VirtioBlockError> {
         OpenOptions::new()
             .read(true)
             .write(!is_disk_read_only)
+            .custom_flags(
+                if matches!(
+                    engine_type,
+                    FileEngineType::SyncDirect | FileEngineType::AsyncDirect
+                ) {
+                    libc::O_DIRECT
+                } else {
+                    0
+                },
+            )
             .open(PathBuf::from(&disk_image_path))
             .map_err(|x| VirtioBlockError::BackingFile(x, disk_image_path.to_string()))
     }
@@ -95,12 +115,14 @@ impl DiskProperties {
         is_disk_read_only: bool,
         file_engine_type: FileEngineType,
     ) -> Result<Self, VirtioBlockError> {
-        let mut disk_image = Self::open_file(&disk_image_path, is_disk_read_only)?;
+        let mut disk_image =
+            Self::open_file(&disk_image_path, is_disk_read_only, file_engine_type)?;
         let disk_size = Self::file_size(&disk_image_path, &mut disk_image)?;
         let image_id = Self::build_disk_image_id(&disk_image);
 
         Ok(Self {
             file_path: disk_image_path,
+            engine_type: file_engine_type,
             file_engine: FileEngine::from_file(disk_image, file_engine_type)
                 .map_err(VirtioBlockError::FileEngine)?,
             nsectors: disk_size >> SECTOR_SHIFT,
@@ -114,13 +136,15 @@ impl DiskProperties {
         disk_image_path: String,
         is_disk_read_only: bool,
     ) -> Result<(), VirtioBlockError> {
-        let mut disk_image = Self::open_file(&disk_image_path, is_disk_read_only)?;
+        let mut disk_image =
+            Self::open_file(&disk_image_path, is_disk_read_only, self.engine_type)?;
         let disk_size = Self::file_size(&disk_image_path, &mut disk_image)?;
 
-        self.image_id = Self::build_disk_image_id(&disk_image);
+        let image_id = Self::build_disk_image_id(&disk_image);
         self.file_engine
             .update_file_path(disk_image)
             .map_err(VirtioBlockError::FileEngine)?;
+        self.image_id = image_id;
         self.nsectors = disk_size >> SECTOR_SHIFT;
         self.file_path = disk_image_path;
 
@@ -535,6 +559,7 @@ impl VirtioBlock {
 
     /// Update the backing file and the config space of the block device.
     pub fn update_disk_image(&mut self, disk_image_path: String) -> Result<(), VirtioBlockError> {
+        self.prepare_save();
         self.disk.update(disk_image_path, self.read_only)?;
         self.config_space.capacity = self.disk.nsectors.to_le(); // virtio_block_config_space();
 
@@ -556,10 +581,7 @@ impl VirtioBlock {
 
     /// Retrieve the file engine type.
     pub fn file_engine_type(&self) -> FileEngineType {
-        match self.disk.file_engine {
-            FileEngine::Sync(_) => FileEngineType::Sync,
-            FileEngine::Async(_) => FileEngineType::Async,
-        }
+        self.disk.engine_type
     }
 
     fn drain_and_flush(&mut self, discard: bool) {
@@ -1866,5 +1888,61 @@ mod tests {
             );
             assert_eq!(block.disk.image_id, id.as_slice());
         }
+    }
+}
+
+#[cfg(test)]
+mod direct_io_experiment_tests {
+    use super::*;
+    use crate::devices::virtio::block::virtio::persist::FileEngineTypeState;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileExt;
+    use vmm_sys_util::tempfile::TempFile;
+
+    #[repr(align(4096))]
+    struct Aligned([u8; 4096]);
+
+    #[test]
+    fn direct_io_open_update_and_data() {
+        for engine in [FileEngineType::SyncDirect, FileEngineType::AsyncDirect] {
+            let first = TempFile::new().unwrap();
+            first.as_file().set_len(16384).unwrap();
+            let mut disk =
+                DiskProperties::new(first.as_path().to_str().unwrap().to_owned(), false, engine)
+                    .unwrap();
+            assert_eq!(disk.engine_type, engine);
+            let file = disk.file_engine.file();
+            // SAFETY: F_GETFL only inspects this live file descriptor.
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+            assert_ne!(flags & libc::O_DIRECT, 0);
+            let data = Box::new(Aligned([0x5a; 4096]));
+            assert_eq!(file.write_at(&data.0, 4096).unwrap(), 4096);
+            file.sync_all().unwrap();
+            let mut readback = Box::new(Aligned([0; 4096]));
+            assert_eq!(file.read_at(&mut readback.0, 4096).unwrap(), 4096);
+            assert_eq!(data.0, readback.0);
+            let second = TempFile::new().unwrap();
+            second.as_file().set_len(16384).unwrap();
+            disk.update(second.as_path().to_str().unwrap().to_owned(), false)
+                .unwrap();
+            assert_eq!(disk.engine_type, engine);
+            // SAFETY: F_GETFL only inspects this live file descriptor.
+            let flags = unsafe { libc::fcntl(disk.file_engine.file().as_raw_fd(), libc::F_GETFL) };
+            assert_ne!(flags & libc::O_DIRECT, 0);
+            let state = FileEngineTypeState::from(engine);
+            let encoded = serde_json::to_string(&state).unwrap();
+            let decoded: FileEngineTypeState = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(FileEngineType::from(decoded), engine);
+        }
+        let file = TempFile::new().unwrap();
+        let disk = DiskProperties::new(
+            file.as_path().to_str().unwrap().to_owned(),
+            false,
+            FileEngineType::Sync,
+        )
+        .unwrap();
+        // SAFETY: F_GETFL only inspects this live file descriptor.
+        let flags = unsafe { libc::fcntl(disk.file_engine.file().as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(flags & libc::O_DIRECT, 0);
     }
 }

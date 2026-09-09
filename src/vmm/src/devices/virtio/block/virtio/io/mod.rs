@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod async_io;
+pub mod direct_io;
+#[cfg(test)]
+mod direct_io_tests;
 pub mod sync_io;
 
 use std::fmt::Debug;
@@ -11,7 +14,7 @@ pub use self::async_io::{AsyncFileEngine, AsyncIoError};
 pub use self::sync_io::{SyncFileEngine, SyncIoError};
 use crate::devices::virtio::block::virtio::PendingRequest;
 use crate::devices::virtio::block::virtio::device::FileEngineType;
-use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
+use crate::vstate::memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
 
 #[derive(Debug)]
 pub struct RequestOk {
@@ -59,6 +62,12 @@ pub enum FileEngine {
 impl FileEngine {
     pub fn from_file(file: File, engine_type: FileEngineType) -> Result<FileEngine, BlockIoError> {
         match engine_type {
+            FileEngineType::AsyncDirect => Ok(Self::Async(
+                AsyncFileEngine::from_direct_file(file).map_err(BlockIoError::Async)?,
+            )),
+            FileEngineType::SyncDirect => Ok(Self::Sync(
+                SyncFileEngine::from_direct_file(file).map_err(BlockIoError::Sync)?,
+            )),
             FileEngineType::Async => Ok(FileEngine::Async(
                 AsyncFileEngine::from_file(file).map_err(BlockIoError::Async)?,
             )),
@@ -69,7 +78,7 @@ impl FileEngine {
     pub fn update_file_path(&mut self, file: File) -> Result<(), BlockIoError> {
         match self {
             FileEngine::Async(engine) => engine.update_file(file).map_err(BlockIoError::Async)?,
-            FileEngine::Sync(engine) => engine.update_file(file),
+            FileEngine::Sync(engine) => engine.update_file(file).map_err(BlockIoError::Sync)?,
         };
 
         Ok(())
@@ -91,6 +100,30 @@ impl FileEngine {
         count: u32,
         req: PendingRequest,
     ) -> Result<FileEngineOk, RequestError<BlockIoError>> {
+        if let Self::Async(engine) = self
+            && let Some(direct) = engine.direct
+        {
+            let ptr = match mem.get_slice(addr, count as usize) {
+                Ok(slice) => slice.ptr_guard_mut().as_ptr(),
+                Err(error) => {
+                    return Err(RequestError {
+                        req,
+                        error: BlockIoError::Async(AsyncIoError::GuestMemory(error)),
+                    });
+                }
+            };
+            if !direct.range_aligned(offset, count)
+                || (!direct.buffer_aligned(ptr) && count as usize > direct_io::MAX_BOUNCE_BYTES)
+            {
+                return match engine.transfer_serialized(offset, mem, addr, count, false) {
+                    Ok(count) => Ok(FileEngineOk::Executed(RequestOk { req, count })),
+                    Err(error) => Err(RequestError {
+                        req,
+                        error: BlockIoError::Async(error),
+                    }),
+                };
+            }
+        }
         match self {
             FileEngine::Async(engine) => match engine.push_read(offset, mem, addr, count, req) {
                 Ok(_) => Ok(FileEngineOk::Submitted),
@@ -117,6 +150,30 @@ impl FileEngine {
         count: u32,
         req: PendingRequest,
     ) -> Result<FileEngineOk, RequestError<BlockIoError>> {
+        if let Self::Async(engine) = self
+            && let Some(direct) = engine.direct
+        {
+            let ptr = match mem.get_slice(addr, count as usize) {
+                Ok(slice) => slice.ptr_guard_mut().as_ptr(),
+                Err(error) => {
+                    return Err(RequestError {
+                        req,
+                        error: BlockIoError::Async(AsyncIoError::GuestMemory(error)),
+                    });
+                }
+            };
+            if !direct.range_aligned(offset, count)
+                || (!direct.buffer_aligned(ptr) && count as usize > direct_io::MAX_BOUNCE_BYTES)
+            {
+                return match engine.transfer_serialized(offset, mem, addr, count, true) {
+                    Ok(count) => Ok(FileEngineOk::Executed(RequestOk { req, count })),
+                    Err(error) => Err(RequestError {
+                        req,
+                        error: BlockIoError::Async(error),
+                    }),
+                };
+            }
+        }
         match self {
             FileEngine::Async(engine) => match engine.push_write(offset, mem, addr, count, req) {
                 Ok(_) => Ok(FileEngineOk::Submitted),
