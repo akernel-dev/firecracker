@@ -24,7 +24,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::OnceLock;
 
-use vm_memory::{GuestAddress, GuestMemory};
+use vm_memory::{GuestAddress, GuestMemoryBackend};
 
 use crate::logger::{debug, trace};
 use crate::vstate::memory::GuestMemoryMmap;

@@ -5,6 +5,8 @@
 //! Partial host blocks are handled only after draining the device's async ring.
 //! The VMM serializes these read-modify-write operations with later submissions.
 
+use vm_memory::GuestMemoryBackend;
+
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::fs::File;
 use std::io;
@@ -14,7 +16,7 @@ use std::ptr::NonNull;
 
 use vm_memory::Bytes;
 
-use crate::vstate::memory::{GuestAddress, GuestMemory, GuestMemoryExtension, GuestMemoryMmap};
+use crate::vstate::memory::{GuestAddress, GuestMemoryExtension, GuestMemoryMmap};
 
 // Linux UAPI <linux/stat.h>, including the Linux 6.1 DIOALIGN fields.
 // libc does not expose statx on musl. Keep this fixed kernel ABI local instead

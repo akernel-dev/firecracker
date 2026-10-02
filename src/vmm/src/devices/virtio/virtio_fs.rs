@@ -14,7 +14,7 @@ use vhost::VhostUserDirtyLogRegion;
 use vhost::vhost_user::message::{
     VhostTransferStateDirection, VhostUserProtocolFeatures, VhostUserVirtioFeatures,
 };
-use vm_memory::{Address, GuestMemory, GuestMemoryRegion};
+use vm_memory::{Address, GuestMemoryBackend, GuestMemoryRegion};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::devices::virtio::ActivateError;
@@ -209,6 +209,7 @@ pub struct VirtioFs {
     id: String,
     socket_path: String,
     tag: [u8; FS_TAG_MAX_LEN],
+    config_space: [u8; FS_TAG_MAX_LEN + 4],
     vu_handle: VhostUserHandle,
     device_state: DeviceState,
     queues: [Queue; FS_NUM_QUEUES],
@@ -285,7 +286,12 @@ impl VirtioFs {
         let mut tag = [0_u8; FS_TAG_MAX_LEN];
         tag[..config.tag.len()].copy_from_slice(config.tag.as_bytes());
 
+        let mut config_space = [0_u8; FS_TAG_MAX_LEN + 4];
+        config_space[..FS_TAG_MAX_LEN].copy_from_slice(&tag);
+        config_space[FS_TAG_MAX_LEN..].copy_from_slice(&NUM_REQUEST_QUEUES.to_le_bytes());
+
         Ok(Self {
+            config_space,
             id: config.fs_id,
             socket_path: config.socket_path,
             tag,
@@ -619,19 +625,17 @@ impl VirtioDevice for VirtioFs {
             .as_ref()
     }
 
-    fn read_config(&self, offset: u64, data: &mut [u8]) {
-        let mut config = [0_u8; FS_TAG_MAX_LEN + std::mem::size_of::<u32>()];
-        config[..FS_TAG_MAX_LEN].copy_from_slice(&self.tag);
-        config[FS_TAG_MAX_LEN..].copy_from_slice(&NUM_REQUEST_QUEUES.to_le_bytes());
+    fn config_as_bytes(&self) -> &[u8] {
+        &self.config_space
+    }
 
-        let Ok(start) = usize::try_from(offset) else {
-            return;
-        };
-        if start >= config.len() {
-            return;
-        }
-        let count = data.len().min(config.len() - start);
-        data[..count].copy_from_slice(&config[start..start + count]);
+    fn deactivate(&mut self) {
+        self.device_state = DeviceState::Inactive;
+    }
+
+    fn _reset(&mut self) -> bool {
+        // As with vhost-user block, backend reset is not yet supported.
+        false
     }
 
     fn write_config(&mut self, _offset: u64, _data: &[u8]) {}

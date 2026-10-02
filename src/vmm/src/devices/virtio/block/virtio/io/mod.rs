@@ -7,6 +7,8 @@ pub mod direct_io;
 mod direct_io_tests;
 pub mod sync_io;
 
+use vm_memory::GuestMemoryBackend;
+
 use std::fmt::Debug;
 use std::fs::File;
 
@@ -14,7 +16,7 @@ pub use self::async_io::{AsyncFileEngine, AsyncIoError};
 pub use self::sync_io::{SyncFileEngine, SyncIoError};
 use crate::devices::virtio::block::virtio::PendingRequest;
 use crate::devices::virtio::block::virtio::device::FileEngineType;
-use crate::vstate::memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
+use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
 
 #[derive(Debug)]
 pub struct RequestOk {
@@ -107,7 +109,7 @@ impl FileEngine {
                 Err(error) => {
                     return Err(RequestError {
                         req,
-                        error: BlockIoError::Async(AsyncIoError::GuestMemory(error)),
+                        error: BlockIoError::Async(AsyncIoError::GuestMemoryBackend(error)),
                     });
                 }
             };
@@ -157,7 +159,7 @@ impl FileEngine {
                 Err(error) => {
                     return Err(RequestError {
                         req,
-                        error: BlockIoError::Async(AsyncIoError::GuestMemory(error)),
+                        error: BlockIoError::Async(AsyncIoError::GuestMemoryBackend(error)),
                     });
                 }
             };

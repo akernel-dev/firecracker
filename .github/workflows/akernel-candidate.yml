@@ -8,7 +8,7 @@ run-name: Build candidate ${{ inputs.release_tag }}
       release_tag:
         description: Planned AKernel Firecracker release tag
         required: true
-        default: v1.16.1-akernel.0
+        default: v1.17.0-akernel.1
         type: string
 
 concurrency:

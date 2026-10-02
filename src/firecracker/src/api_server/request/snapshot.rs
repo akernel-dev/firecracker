@@ -286,6 +286,8 @@ mod tests {
             state_only: true,
             deferred_sync: false,
             fs_state_path: None,
+
+            sync_snapshot_files: true,
         };
         assert_eq!(
             vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
@@ -306,6 +308,8 @@ mod tests {
             state_only: false,
             deferred_sync: true,
             fs_state_path: None,
+
+            sync_snapshot_files: true,
         };
         assert_eq!(
             vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),

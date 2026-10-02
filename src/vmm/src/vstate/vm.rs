@@ -37,8 +37,8 @@ use crate::vstate::bus::Bus;
 use crate::vstate::interrupts::{InterruptError, MsixVector, MsixVectorGroup};
 use crate::vstate::kvm::Kvm;
 use crate::vstate::memory::{
-    GuestAddress, GuestMemory, GuestMemoryExtension, GuestMemoryMmap, GuestMemoryRegion,
-    GuestMemoryState, GuestRegionMmap, GuestRegionMmapExt, MemoryError,
+    GuestAddress, GuestMemoryExtension, GuestMemoryMmap, GuestMemoryRegion, GuestMemoryState,
+    GuestRegionMmap, GuestRegionMmapExt, MemoryError,
 };
 use crate::vstate::pagemap_anon::{self, MemoryRange, filter_memory_ranges_by_pagemap_anon};
 use crate::vstate::resources::ResourceAllocator;
@@ -1299,8 +1299,7 @@ pub(crate) mod tests {
     use std::sync::atomic::Ordering;
 
     use vm_memory::GuestAddress;
-    use vm_memory::mmap::MmapRegionBuilder;
-    use vm_memory::{Bytes, GuestMemory};
+    use vm_memory::{Bytes, GuestMemoryBackend};
 
     use super::*;
     use crate::arch;
@@ -1410,7 +1409,6 @@ pub(crate) mod tests {
             }
         }
     }
-    use crate::vstate::memory::GuestRegionMmap;
 
     // Auxiliary function being used throughout the tests.
     pub(crate) fn setup_vm() -> KvmVm {

@@ -27,7 +27,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, OnceLock};
 
-use vm_memory::{GuestAddress, GuestMemory};
+use vm_memory::{GuestAddress, GuestMemoryBackend};
 
 use crate::logger::{debug, trace};
 use crate::vstate::memory::GuestMemoryMmap;
@@ -623,7 +623,7 @@ mod tests {
     use super::*;
     use crate::vmm_config::machine_config::HugePageConfig;
     use crate::vstate::memory::test_utils::into_region_ext;
-    use vm_memory::{Bytes, GuestAddress, GuestMemory};
+    use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend};
 
     /// Build a page-aligned guest memory fixture of `num_pages` host pages
     /// starting at GPA 0, anonymous MAP_PRIVATE (so faulted pages are KPF_ANON).

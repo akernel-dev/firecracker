@@ -235,7 +235,7 @@ pub fn create_snapshot(
     }
 
     if let Some(path) = params.fs_state_path.as_deref() {
-        vmm.prepare_virtio_fs_snapshot(path, params.deferred_sync)?;
+        vmm.prepare_virtio_fs_snapshot(path, params.defer_snapshot_sync())?;
     }
     let virtio_fs_dirty_ranges = vmm.virtio_fs_dirty_ranges();
 
@@ -244,7 +244,11 @@ pub fn create_snapshot(
             .save_state(vm_info)
             .map_err(CreateSnapshotError::MicrovmState)?;
 
-        snapshot_state_to_file(&microvm_state, &params.snapshot_path, params.deferred_sync)?;
+        snapshot_state_to_file(
+            &microvm_state,
+            &params.snapshot_path,
+            params.defer_snapshot_sync(),
+        )?;
 
         let kvm_vm = if let Some(mem_file_path) = mem_file_path {
             let kvm_vm = vmm.vm.as_kvm().ok_or_else(|| {
@@ -255,7 +259,7 @@ pub fn create_snapshot(
             kvm_vm.snapshot_memory_to_file(
                 mem_file_path,
                 params.snapshot_type,
-                params.deferred_sync,
+                params.defer_snapshot_sync(),
                 &virtio_fs_dirty_ranges,
                 has_virtio_fs,
             )?;
@@ -445,7 +449,7 @@ pub enum RestoreFromSnapshotError {
     /// Invalid snapshot state: {0}
     Invalid(#[from] SnapShotStateSanityCheckError),
     /// Failed to load guest memory: {0}
-    GuestMemory(#[from] RestoreFromSnapshotGuestMemoryError),
+    GuestMemoryBackend(#[from] RestoreFromSnapshotGuestMemoryError),
     /// Failed to build microVM from snapshot: {0}
     Build(#[from] BuildMicrovmFromSnapshotError),
     /// Invalid guest memory backend configuration: {0}
@@ -486,7 +490,7 @@ pub fn restore_from_snapshot(
         _ => {}
     }
     let mut microvm_state = snapshot_state_from_file(&params.snapshot_path)?;
-    if microvm_state.device_states.mmio_state.fs_device.is_some()
+    if matches!(&microvm_state.device_states.virtio_state, VirtioDevicesState::Mmio(state) if state.fs_device.is_some())
         && params.mem_backend.backend_type != MemBackendType::SharedFile
     {
         return Err(RestoreFromSnapshotError::InvalidMemoryBackend(
@@ -536,7 +540,10 @@ pub fn restore_from_snapshot(
     }
 
     match (
-        microvm_state.device_states.mmio_state.fs_device.as_mut(),
+        match &mut microvm_state.device_states.virtio_state {
+            VirtioDevicesState::Mmio(state) => state.fs_device.as_mut(),
+            VirtioDevicesState::Pci(_) => None,
+        },
         params.fs_override.as_ref(),
     ) {
         (Some(device), Some(fs_override)) if device.device_id == fs_override.fs_id => {
@@ -616,6 +623,7 @@ pub fn restore_from_snapshot(
                     mem_backend_path,
                     mem_state,
                     track_dirty_pages,
+                    vm_resources.machine_config.huge_pages,
                 )
                 .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
                 None,
@@ -700,6 +708,7 @@ fn guest_memory_from_shared_file(
     live_path: &Path,
     mem_state: &GuestMemoryState,
     track_dirty_pages: bool,
+    huge_pages: HugePageConfig,
 ) -> Result<Vec<GuestRegionMmap>, GuestMemoryFromFileError> {
     use std::os::fd::AsRawFd;
 
@@ -771,8 +780,12 @@ fn guest_memory_from_shared_file(
         }
     }
 
-    let guest_mem =
-        memory::snapshot_live_file_shared(live, mem_state.regions(), track_dirty_pages)?;
+    let guest_mem = memory::snapshot_live_file_shared(
+        live,
+        mem_state.regions(),
+        track_dirty_pages,
+        huge_pages,
+    )?;
     cleanup.keep = true;
     Ok(guest_mem)
 }
@@ -1079,6 +1092,7 @@ mod tests {
             &live_path,
             &single_region_memory_state(4096),
             true,
+            HugePageConfig::None,
         )
         .unwrap();
         regions[0]
@@ -1111,6 +1125,7 @@ mod tests {
             live.as_path(),
             &single_region_memory_state(4096),
             false,
+            HugePageConfig::None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -1133,6 +1148,7 @@ mod tests {
             &live_path,
             &single_region_memory_state(4096),
             false,
+            HugePageConfig::None,
         )
         .unwrap_err();
         assert!(matches!(err, GuestMemoryFromFileError::Restore(_)));
@@ -1151,6 +1167,7 @@ mod tests {
             &live_path,
             &single_region_memory_state(4096),
             false,
+            HugePageConfig::None,
         )
         .unwrap_err();
         assert!(matches!(

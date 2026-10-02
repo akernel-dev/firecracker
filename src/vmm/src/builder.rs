@@ -87,7 +87,7 @@ pub enum StartMicrovmError {
     #[cfg(target_arch = "aarch64")]
     EnablePVTime(crate::arch::VcpuArchError),
     /// Invalid Memory Configuration: {0}
-    GuestMemory(crate::vstate::memory::MemoryError),
+    GuestMemoryBackend(crate::vstate::memory::MemoryError),
     /// Error with initrd initialization: {0}.
     Initrd(#[from] InitrdError),
     /// Internal error while starting microVM: {0}
@@ -158,7 +158,7 @@ pub fn build_microvm_for_boot(
 
     let guest_memory = vm_resources
         .allocate_guest_memory()
-        .map_err(StartMicrovmError::GuestMemory)?;
+        .map_err(StartMicrovmError::GuestMemoryBackend)?;
 
     // Clone the command-line so that a failed boot doesn't pollute the original.
     // If the user didn't provide boot_args, use the KVM-specific default.
@@ -189,7 +189,7 @@ pub fn build_microvm_for_boot(
                 addr,
                 u64_to_usize(u32_mib_to_bytes(memory_hotplug.total_size_mib)),
             )
-            .map_err(StartMicrovmError::GuestMemory)?;
+            .map_err(StartMicrovmError::GuestMemoryBackend)?;
         vm.register_hotpluggable_memory_region(
             hotplug_memory_region,
             u64_to_usize(u32_mib_to_bytes(memory_hotplug.slot_size_mib)),
@@ -623,7 +623,10 @@ fn attach_fs_device(
     config: &crate::vmm_config::virtio_fs::FsConfig,
     event_manager: &mut EventManager,
 ) -> Result<(), AttachDeviceError> {
-    if device_manager.is_pci_enabled() {
+    if matches!(
+        device_manager.virtio_devices,
+        crate::device_manager::VirtioDevices::Pci(_)
+    ) {
         return Err(AttachDeviceError::VirtioFsRequiresMmio);
     }
 
@@ -635,7 +638,7 @@ fn attach_fs_device(
     )?;
     let device = Arc::new(Mutex::new(fs));
     event_manager.add_subscriber(device.clone());
-    device_manager.attach_virtio_device(
+    device_manager.attach_boot_virtio_device(
         vm,
         config.fs_id.clone(),
         device,

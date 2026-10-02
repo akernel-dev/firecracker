@@ -11,8 +11,9 @@ use std::time::Duration;
 use vmm::builder::build_and_boot_microvm;
 use vmm::devices::virtio::block::CacheType;
 use vmm::persist::{
-    CreateSnapshotError, GuestMemoryFromFileError, MicrovmState, MicrovmStateError, RestoreFromSnapshotError,
-    RestoreFromSnapshotGuestMemoryError, VirtioDevicesState, VmInfo, snapshot_state_sanity_check,
+    CreateSnapshotError, GuestMemoryFromFileError, MicrovmState, MicrovmStateError,
+    RestoreFromSnapshotError, RestoreFromSnapshotGuestMemoryError, VirtioDevicesState, VmInfo,
+    snapshot_state_sanity_check,
 };
 use vmm::resources::VmResources;
 use vmm::rpc_interface::{
@@ -27,8 +28,8 @@ use vmm::vmm_config::balloon::BalloonDeviceConfig;
 use vmm::vmm_config::boot_source::BootSourceConfig;
 use vmm::vmm_config::drive::BlockDeviceConfig;
 use vmm::vmm_config::instance_info::{InstanceInfo, VmState};
-use vmm::vmm_config::machine_config::{HugePageConfig, MachineConfig, MachineConfigUpdate};
 use vmm::vmm_config::machine_config::DEFAULT_MEM_SIZE_MIB;
+use vmm::vmm_config::machine_config::{HugePageConfig, MachineConfig, MachineConfigUpdate};
 use vmm::vmm_config::net::NetworkInterfaceConfig;
 use vmm::vmm_config::snapshot::{
     CreateSnapshotParams, LoadSnapshotParams, MemBackendConfig, MemBackendType,
@@ -364,6 +365,8 @@ fn test_create_snapshot_invalid_params_no_side_effects() {
             deferred_sync: false,
             state_only: false,
             fs_state_path: None,
+
+            sync_snapshot_files: true,
         },
         // state_only=true with mem_file_path.
         CreateSnapshotParams {
@@ -373,6 +376,8 @@ fn test_create_snapshot_invalid_params_no_side_effects() {
             deferred_sync: false,
             state_only: true,
             fs_state_path: None,
+
+            sync_snapshot_files: true,
         },
         // state_only=true with an incremental type.
         CreateSnapshotParams {
@@ -382,6 +387,8 @@ fn test_create_snapshot_invalid_params_no_side_effects() {
             deferred_sync: false,
             state_only: true,
             fs_state_path: None,
+
+            sync_snapshot_files: true,
         },
     ];
     for params in invalid_params {
@@ -463,6 +470,8 @@ fn test_incremental_snapshot_arms_soft_dirty_window() {
                 deferred_sync: false,
                 state_only: false,
                 fs_state_path: None,
+
+                sync_snapshot_files: true,
             }),
             &mut event_manager,
         )
@@ -521,6 +530,8 @@ fn test_incremental_snapshot_arms_soft_dirty_window() {
                 deferred_sync: false,
                 state_only: false,
                 fs_state_path: None,
+
+                sync_snapshot_files: true,
             }),
             &mut event_manager,
         )
@@ -552,8 +563,16 @@ fn test_incremental_snapshot_arms_soft_dirty_window() {
         "SoftDirty snapshot wrote {differing_pages} pages but the window preview          reported only {preview_dirty_pages} dirty pages"
     );
 
-    verify_load_snapshot(incremental_state, incremental_memory);
-    verify_load_snapshot(soft_dirty_state, soft_dirty_memory);
+    verify_load_snapshot(
+        incremental_state,
+        incremental_memory,
+        SnapshotLoadHugePageConfig::Snapshot,
+    );
+    verify_load_snapshot(
+        soft_dirty_state,
+        soft_dirty_memory,
+        SnapshotLoadHugePageConfig::Snapshot,
+    );
 }
 
 #[test]
@@ -608,6 +627,7 @@ fn test_load_snapshot_rejects_hugetlbfs_with_file_backend() {
             mem_backend: MemBackendConfig {
                 backend_path: memory_file.as_path().to_path_buf(),
                 backend_type: MemBackendType::File,
+                source_path: None,
             },
             track_dirty_pages: false,
             resume_vm: false,
@@ -615,15 +635,18 @@ fn test_load_snapshot_rejects_hugetlbfs_with_file_backend() {
             vsock_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Hugetlbfs2M,
+            fs_override: None,
         }))
         .unwrap_err();
 
     assert!(matches!(
         error,
         VmmActionError::LoadSnapshot(LoadSnapshotError::RestoreFromSnapshot(
-            RestoreFromSnapshotError::GuestMemory(RestoreFromSnapshotGuestMemoryError::File(
-                GuestMemoryFromFileError::HugetlbfsSnapshot
-            ))
+            RestoreFromSnapshotError::GuestMemoryBackend(
+                RestoreFromSnapshotGuestMemoryError::File(
+                    GuestMemoryFromFileError::HugetlbfsSnapshot
+                )
+            )
         ))
     ));
 }

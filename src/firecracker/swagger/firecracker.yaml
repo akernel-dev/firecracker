@@ -1802,8 +1802,8 @@ definitions:
           When true, Firecracker skips the fsync of the state and memory
           files and the caller takes over durability (e.g. an orchestrator
           that fsyncs the files before committing a manifest). When false
-          (default), a successful create request leaves the files durably
-          written.
+          (default), files are synced unless sync_snapshot_files is false.
+          This also controls the virtio-fs migration sidecar.
       sync_snapshot_files:
         type: boolean
         default: true
@@ -1815,7 +1815,8 @@ definitions:
           faster at the cost of durability across a host crash; the data stays
           in the host page cache, so same-host reads still see the full
           contents. Block device backing files are always fsync'd regardless of
-          this setting.
+          this setting. deferred_sync=true also disables snapshot file sync,
+          including the virtio-fs migration sidecar.
       fs_state_path:
         type: string
         description:

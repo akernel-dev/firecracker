@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::{FS_NUM_QUEUES, FS_QUEUE_SIZE, VirtioFs, VirtioFsError};
-use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceType};
+use crate::devices::virtio::device::VirtioDeviceType;
 use crate::devices::virtio::persist::{PersistError as VirtioPersistError, VirtioDeviceState};
 use crate::snapshot::Persist;
 use crate::vmm_config::virtio_fs::FsConfig;

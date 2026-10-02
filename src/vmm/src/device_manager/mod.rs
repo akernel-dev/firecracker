@@ -46,8 +46,6 @@ use crate::devices::virtio::net::persist::NetPersistError;
 use crate::devices::virtio::pmem::device::Pmem;
 use crate::devices::virtio::pmem::persist::PmemPersistError;
 use crate::devices::virtio::rng::persist::EntropyPersistError;
-use crate::devices::virtio::transport::mmio::{IrqTrigger, MmioTransport};
-use crate::devices::virtio::transport::pci::device::CAPABILITY_BAR_SIZE;
 use crate::devices::virtio::virtio_fs::VirtioFsError;
 use crate::devices::virtio::virtio_fs::persist::VirtioFsPersistError;
 use crate::devices::virtio::vsock::{VsockError, VsockUnixBackendError};

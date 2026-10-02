@@ -88,6 +88,15 @@ pub struct CreateSnapshotParams {
     pub sync_snapshot_files: bool,
 }
 
+impl CreateSnapshotParams {
+    /// Honor upstream sync control and the legacy AKernel opt-out.
+    /// Either explicit opt-out delegates state, memory and filesystem-sidecar
+    /// durability to the caller. Block device flushes remain mandatory.
+    pub fn defer_snapshot_sync(&self) -> bool {
+        self.deferred_sync || !self.sync_snapshot_files
+    }
+}
+
 /// Default value for [CreateSnapshotParams::sync_snapshot_files].
 fn default_sync_snapshot_files() -> bool {
     true
@@ -245,4 +254,32 @@ pub enum VmState {
 pub struct Vm {
     /// The microVM state, which can be `paused` or `resumed`.
     pub state: VmState,
+}
+
+#[cfg(test)]
+mod sync_compatibility_tests {
+    use super::CreateSnapshotParams;
+
+    #[test]
+    fn snapshot_durability_defaults_and_explicit_opt_outs() {
+        for (fields, deferred) in [
+            ("", false),
+            (r#", "sync_snapshot_files": true"#, false),
+            (r#", "sync_snapshot_files": false"#, true),
+            (r#", "deferred_sync": true"#, true),
+            (
+                r#", "deferred_sync": true, "sync_snapshot_files": true"#,
+                true,
+            ),
+            (
+                r#", "deferred_sync": false, "sync_snapshot_files": false"#,
+                true,
+            ),
+        ] {
+            let request =
+                format!(r#"{{"snapshot_path": "state", "mem_file_path": "memory"{fields}}}"#);
+            let params: CreateSnapshotParams = serde_json::from_str(&request).unwrap();
+            assert_eq!(params.defer_snapshot_sync(), deferred, "{request}");
+        }
+    }
 }

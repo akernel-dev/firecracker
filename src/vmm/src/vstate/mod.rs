@@ -7,7 +7,7 @@ pub mod bus;
 pub mod interrupts;
 /// Module with Kvm implementation.
 pub mod kvm;
-/// Module with GuestMemory implementation.
+/// Module with GuestMemoryBackend implementation.
 pub mod memory;
 /// Pagemap-anon (KPF_ANON) incremental snapshot ledger.
 pub mod pagemap_anon;

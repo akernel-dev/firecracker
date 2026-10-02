@@ -996,6 +996,7 @@ pub fn snapshot_live_file_shared(
     file: File,
     regions: impl Iterator<Item = (GuestAddress, usize)>,
     track_dirty_pages: bool,
+    huge_pages: HugePageConfig,
 ) -> Result<Vec<GuestRegionMmap>, MemoryError> {
     let regions: Vec<_> = regions.collect();
     let memory_size = regions
@@ -1012,6 +1013,7 @@ pub fn snapshot_live_file_shared(
         libc::MAP_SHARED,
         Some(file),
         track_dirty_pages,
+        huge_pages.madvise_flags(),
     )
 }
 

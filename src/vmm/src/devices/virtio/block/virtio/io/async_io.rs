@@ -6,8 +6,8 @@ use std::fs::File;
 use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
 
-use vm_memory::{Bytes, GuestMemoryBackend, GuestMemoryError};
 use super::direct_io::{AlignedBuffer, DirectIo};
+use vm_memory::{Bytes, GuestMemoryBackend, GuestMemoryError};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::devices::virtio::block::virtio::io::RequestError;
@@ -32,8 +32,8 @@ pub enum AsyncIoError {
     SyncAll(std::io::Error),
     /// EventFd: {0}
     EventFd(std::io::Error),
-    /// GuestMemory: {0}
-    GuestMemory(GuestMemoryError),
+    /// GuestMemoryBackend: {0}
+    GuestMemoryBackend(GuestMemoryError),
 }
 
 #[derive(Debug)]
@@ -155,7 +155,7 @@ impl AsyncFileEngine {
             .map_err(AsyncIoError::IO)?;
         if !read {
             mem.read_slice(bounce.as_mut_slice(), addr)
-                .map_err(AsyncIoError::GuestMemory)?;
+                .map_err(AsyncIoError::GuestMemoryBackend)?;
         }
         Ok(Some(bounce))
     }
@@ -202,7 +202,7 @@ impl AsyncFileEngine {
             Err(err) => {
                 return Err(RequestError {
                     req,
-                    error: AsyncIoError::GuestMemory(err),
+                    error: AsyncIoError::GuestMemoryBackend(err),
                 });
             }
         };
@@ -242,7 +242,7 @@ impl AsyncFileEngine {
             Err(err) => {
                 return Err(RequestError {
                     req,
-                    error: AsyncIoError::GuestMemory(err),
+                    error: AsyncIoError::GuestMemoryBackend(err),
                 });
             }
         };
