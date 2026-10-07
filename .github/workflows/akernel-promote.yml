@@ -67,6 +67,11 @@ jobs:
           manifest_run_id="$(jq -er '.workflow_run_id' "${manifest}")"
           vmm_version="$(jq -er '.vmm.version' "${manifest}")"
           kernel_tag="$(jq -er '.guest_kernel.source_tag' "${manifest}")"
+          kernel_profile="$(jq -r '.kernel_profile // "kvm"' "${manifest}")"
+          case "${kernel_profile}" in
+            kvm|pvm) ;;
+            *) echo "invalid kernel profile: ${kernel_profile}" >&2; exit 1 ;;
+          esac
 
           test "$(jq -er '.component' "${manifest}")" = \
             "akernel-firecracker-runtime"
@@ -104,6 +109,7 @@ jobs:
           mkdir "${extract_dir}"
           tar -xzf "${archive}" -C "${extract_dir}"
           bundle_dir="${extract_dir}/release-${release_tag}-x86_64"
+          cmp "${manifest}" "${bundle_dir}/manifest.json"
           (
             cd "${bundle_dir}"
             sha256sum --check SHA256SUMS
@@ -126,6 +132,7 @@ jobs:
           echo "vmm_version=${vmm_version}" >>"${GITHUB_OUTPUT}"
           echo "vmm_source=$(jq -er '.vmm.source' "${manifest}")" >>"${GITHUB_OUTPUT}"
           echo "kernel_tag=${kernel_tag}" >>"${GITHUB_OUTPUT}"
+          echo "kernel_profile=${kernel_profile}" >>"${GITHUB_OUTPUT}"
           echo "archive=${archive}" >>"${GITHUB_OUTPUT}"
           echo "archive_checksum=${archive_checksum}" >>"${GITHUB_OUTPUT}"
           echo "manifest=${manifest}" >>"${GITHUB_OUTPUT}"
@@ -162,6 +169,7 @@ jobs:
           VMM_VERSION: ${{ steps.candidate.outputs.vmm_version }}
           VMM_SOURCE: ${{ steps.candidate.outputs.vmm_source }}
           KERNEL_TAG: ${{ steps.candidate.outputs.kernel_tag }}
+          KERNEL_PROFILE: ${{ steps.candidate.outputs.kernel_profile }}
         run: |
           set -euo pipefail
 
@@ -178,7 +186,13 @@ jobs:
               echo "AKernel runtime bundle using the official Firecracker ${VMM_VERSION} VMM."
             fi
             echo
-            echo "The guest kernel is built from Amazon Linux ${KERNEL_TAG} with the AKernel EROFS configuration fragment."
+            if [ "${KERNEL_PROFILE}" = pvm ]; then
+              echo "The opt-in PVM guest kernel is built from virt-pvm/linux commit ${KERNEL_TAG}."
+              echo "It requires a dedicated PVM host and backend-compatible checkpoint placement."
+              echo "This bundle does not install or switch the host kernel or KVM vendor module."
+            else
+              echo "The guest kernel is built from Amazon Linux ${KERNEL_TAG} with the AKernel EROFS configuration fragment."
+            fi
             echo
             echo "Candidate workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}"
             echo
