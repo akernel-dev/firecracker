@@ -11,7 +11,7 @@ run-name: Build candidate ${{ inputs.release_tag }} (${{ inputs.kernel_profile }
         default: v1.16.1-akernel.0
         type: string
       kernel_profile:
-        description: Guest kernel profile (PVM requires a dedicated PVM host)
+        description: Guest kernel profile (PVM requires paired OOT host modules)
         required: true
         default: kvm
         type: choice

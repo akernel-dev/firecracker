@@ -63,16 +63,13 @@ default runtime merely to enable PVM. Verify both the archive checksum and the
 archive's `SHA256SUMS`, then test that exact candidate with the consuming
 sandboxd and AKernel revision before promotion.
 
-This is a guest bundle. A PVM node separately requires the matching PVM host
-kernel and vendor module, the supported host CPU features, and host boot
-settings. It does not provision host kernels, unload modules, reboot nodes, or
-provide TSC scaling. Hardware KVM and PVM checkpoints carry different vCPU state
-and cannot be interchanged. The sandboxd `firecracker-pvm` runtime profile owns
-backend detection and restore restrictions; use its deployment documentation and
-validate the target host before advertising the runtime. Build the guest-agent
-initrd from the consuming sandboxd revision, as with the default bundle.
+This guest bundle runs on a distribution host kernel with a matching out-of-tree PVM `kvm.ko`/`kvm-pvm.ko` pair built from `virt-pvm/linux`'s `pvm-6.12-host-oot` source and the qualified target-version compatibility changes. The deployment does not require rebuilding or replacing the host kernel binary. AKernel's `deploy/pvm/oot-host.env` fixes the separately tested host-module source; its `deploy/pvm-runtime.md` documents build, loading and rollback. The OOT branch contains the host implementation only, so `pvm-kernel-versions.env` deliberately retains the separate PVM-enabled guest source. The bundle does not build or install host modules.
 
-The separately built host requires `CONFIG_KVM` and `CONFIG_KVM_PVM`, a complete matching module tree, AKernel's networking/storage prerequisites, and the tested `nokaslr pti=off` boot settings. AKernel's `deploy/pvm-runtime.md` and `deploy/pvm/host.config` document those host inputs. Its optional `deploy/pvm/kvm-debugctl-backend-scope.patch` moves `vcpu->arch.host_debugctl = get_debugctlmsr();` from the common host KVM path into VMX/SVM so nested PVM avoids an unnecessary `IA32_DEBUGCTL` read. Preserve the hardware backends' state restoration; deleting the save unconditionally or mixing patched and stock modules is insufficient. That optimization is a host-kernel patch, is not applied by this guest-bundle builder, and requires separate host qualification.
+VMX/SVM need not be exposed to the host/L1. Qualification used an original Ubuntu `7.0.0-30-generic` L1 with both VMX and SVM hidden, while stock Intel KVM loading failed and the OOT PVM pair loaded successfully. The CPU must still support FSGSBASE, RDTSCP and CMPXCHG16B, and the tested host uses `nokaslr pti=off` with FRED disabled and KASAN unsupported. Built-in KVM cannot be replaced this way; existing VM users must be stopped before switching the matched module pair. Keep the distribution networking/storage modules available and satisfy its module-signing policy. Other host kernel versions and AMD execution need separate qualification.
+
+Hardware KVM and PVM checkpoints carry different vCPU state and cannot be interchanged. PVM does not provide TSC scaling. The sandboxd `firecracker-pvm` runtime profile owns backend detection and restore restrictions; validate the actual `/dev/kvm` ABI before advertising the runtime. Build the guest-agent initrd from the consuming sandboxd revision, as with the default bundle.
+
+The optional `deploy/pvm/kvm-debugctl-backend-scope.patch` changes the OOT module source: it moves `vcpu->arch.host_debugctl = get_debugctlmsr();` from the common KVM path into the VMX/SVM source paths, since PVM saves its own value. Rebuild the matched OOT modules against the unchanged distribution kernel; no host kernel build or replacement is involved. The OOT build does not compile the older VMX/SVM backends, and the replacement core must not be mixed with stock vendor modules. This guest-bundle builder does not apply the optimization, and the unoptimized OOT qualification does not qualify its performance or execution.
 
 Before promotion, run the privileged virtio-fs checkpoint test on an XFS host
 with KVM. It builds a small BusyBox initramfs, verifies the host and guest

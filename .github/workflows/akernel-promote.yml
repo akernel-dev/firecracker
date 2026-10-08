@@ -188,7 +188,9 @@ jobs:
             echo
             if [ "${KERNEL_PROFILE}" = pvm ]; then
               echo "The opt-in PVM guest kernel is built from virt-pvm/linux commit ${KERNEL_TAG}."
-              echo "It requires a dedicated PVM host and backend-compatible checkpoint placement."
+              echo "It uses a distribution host kernel with paired OOT kvm.ko/kvm-pvm.ko modules."
+              echo "VMX/SVM is not required; PVM CPU and host boot prerequisites still apply."
+              echo "Backend-compatible checkpoint placement remains required."
               echo "This bundle does not install or switch the host kernel or KVM vendor module."
             else
               echo "The guest kernel is built from Amazon Linux ${KERNEL_TAG} with the AKernel EROFS configuration fragment."
