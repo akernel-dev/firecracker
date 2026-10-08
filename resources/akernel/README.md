@@ -39,6 +39,8 @@ required built-in filesystem, network, and virtio options as well as
 `PVM_GUEST`, `X86_PIE`, and Intel memory protection keys. EROFS LZMA and FUSE
 DAX remain disabled.
 
+The guest config explicitly enables `CONFIG_KVM_GUEST=y`, `CONFIG_PVM_GUEST=y`, `CONFIG_X86_PIE=y`, and `CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS=y`. Keep MPK enabled when adapting the configuration: on a PKU-capable PVM host this aligns guest and host `XCR0.PKRU`, avoiding repeated intercepted `XSETBV` instructions in nested deployments. Check the actual host/guest xstate masks rather than assuming the tested machine's `0x2ff` mask applies to every CPU. This xstate optimization does not establish guest pkey permission enforcement, which is incomplete in the pinned PVM revision; workloads must not rely on that enforcement.
+
 ```sh
 AKERNEL_KERNEL_PROFILE=pvm AKERNEL_BUILD_JOBS=8 \
     resources/akernel/build-runtime-bundle.sh \
@@ -69,6 +71,8 @@ and cannot be interchanged. The sandboxd `firecracker-pvm` runtime profile owns
 backend detection and restore restrictions; use its deployment documentation and
 validate the target host before advertising the runtime. Build the guest-agent
 initrd from the consuming sandboxd revision, as with the default bundle.
+
+The separately built host requires `CONFIG_KVM` and `CONFIG_KVM_PVM`, a complete matching module tree, AKernel's networking/storage prerequisites, and the tested `nokaslr pti=off` boot settings. AKernel's `deploy/pvm-runtime.md` and `deploy/pvm/host.config` document those host inputs. Its optional `deploy/pvm/kvm-debugctl-backend-scope.patch` moves `vcpu->arch.host_debugctl = get_debugctlmsr();` from the common host KVM path into VMX/SVM so nested PVM avoids an unnecessary `IA32_DEBUGCTL` read. Preserve the hardware backends' state restoration; deleting the save unconditionally or mixing patched and stock modules is insufficient. That optimization is a host-kernel patch, is not applied by this guest-bundle builder, and requires separate host qualification.
 
 Before promotion, run the privileged virtio-fs checkpoint test on an XFS host
 with KVM. It builds a small BusyBox initramfs, verifies the host and guest
