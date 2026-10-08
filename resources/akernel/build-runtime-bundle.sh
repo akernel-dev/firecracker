@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 VERSIONS_FILE="${AKERNEL_RUNTIME_VERSIONS_FILE:-${SCRIPT_DIR}/runtime-versions.env}"
 KERNEL_FRAGMENT="${SCRIPT_DIR}/kernel/akernel.config"
+kernel_profile="${AKERNEL_KERNEL_PROFILE:-kvm}"
 
 log() {
     printf '[akernel-bundle] %s\n' "$*"
@@ -24,6 +25,7 @@ output_dir="${2:-}"
 [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-akernel\.[0-9]+$ ]] ||
     fail "release tag must match vX.Y.Z-akernel.N"
 [ -n "${output_dir}" ] || fail "output directory is required"
+output_dir="$(realpath -m -- "${output_dir}")"
 [ ! -e "${output_dir}" ] ||
     fail "output directory already exists: ${output_dir}"
 [ -f "${VERSIONS_FILE}" ] ||
@@ -31,6 +33,25 @@ output_dir="${2:-}"
 
 # shellcheck source=runtime-versions.env
 source "${VERSIONS_FILE}"
+
+case "${kernel_profile}" in
+    kvm)
+        kernel_repository="https://github.com/amazonlinux/linux"
+        base_config_path="resources/guest_configs/microvm-kernel-ci-x86_64-${GUEST_KERNEL_VERSION}.config"
+        ;;
+    pvm)
+        # PVM has a separate immutable source pin and a tested 6.12 config.
+        # Keep the default Amazon Linux bundle unchanged.
+        source "${SCRIPT_DIR}/pvm-kernel-versions.env"
+        kernel_repository="https://github.com/virt-pvm/linux"
+        base_config_path="resources/akernel/kernel/pvm-guest.config"
+        ;;
+    *) fail "AKERNEL_KERNEL_PROFILE must be kvm or pvm" ;;
+esac
+
+build_jobs="${AKERNEL_BUILD_JOBS:-$(nproc)}"
+[[ "${build_jobs}" =~ ^[1-9][0-9]*$ ]] ||
+    fail "AKERNEL_BUILD_JOBS must be a positive integer"
 
 required_versions=(
     FIRECRACKER_VERSION
@@ -50,12 +71,12 @@ done
 [ -z "$(git -C "${ROOT_DIR}" status --porcelain --untracked-files=no)" ] ||
     fail "tracked source changes must be committed before building a bundle"
 
-for command_name in cargo curl file gcc gzip jq make sha256sum tar; do
+for command_name in cargo curl file gcc gzip jq make realpath sha256sum tar; do
     command -v "${command_name}" >/dev/null 2>&1 ||
         fail "missing command: ${command_name}"
 done
 
-base_kernel_config="${ROOT_DIR}/resources/guest_configs/microvm-kernel-ci-x86_64-${GUEST_KERNEL_VERSION}.config"
+base_kernel_config="${ROOT_DIR}/${base_config_path}"
 [ -f "${base_kernel_config}" ] ||
     fail "missing Firecracker guest kernel config: ${base_kernel_config}"
 [ -f "${KERNEL_FRAGMENT}" ] ||
@@ -95,11 +116,16 @@ done
 "${vmm_source_binary}" --version | grep -F "Firecracker v${FIRECRACKER_VERSION}" ||
     fail "built VMM does not report Firecracker v${FIRECRACKER_VERSION}"
 
-kernel_archive="${work_dir}/amazon-linux-kernel.tar.gz"
+kernel_archive="${work_dir}/guest-kernel.tar.gz"
 kernel_url="${GUEST_KERNEL_SOURCE_BASE_URL}/${GUEST_KERNEL_TAG}"
-log "downloading Amazon Linux guest kernel ${GUEST_KERNEL_TAG}"
-curl -fSL --retry 10 --retry-delay 2 --retry-all-errors \
-    "${kernel_url}" -o "${kernel_archive}"
+if [ -n "${AKERNEL_KERNEL_SOURCE_ARCHIVE:-}" ]; then
+    log "using checksum-verified local guest kernel archive"
+    cp -- "${AKERNEL_KERNEL_SOURCE_ARCHIVE}" "${kernel_archive}"
+else
+    log "downloading ${kernel_profile} guest kernel ${GUEST_KERNEL_TAG}"
+    curl -fSL --retry 10 --retry-delay 2 --retry-all-errors \
+        "${kernel_url}" -o "${kernel_archive}"
+fi
 printf '%s  %s\n' "${GUEST_KERNEL_SOURCE_SHA256}" \
     "${kernel_archive}" | sha256sum --check -
 tar -xzf "${kernel_archive}" -C "${work_dir}/linux" --strip-components=1
@@ -135,6 +161,13 @@ required_kernel_config=(
     CONFIG_VIRTIO_NET=y
     CONFIG_VIRTIO_VSOCKETS=y
 )
+if [ "${kernel_profile}" = pvm ]; then
+    required_kernel_config+=(
+        CONFIG_PVM_GUEST=y
+        CONFIG_X86_PIE=y
+        CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS=y
+    )
+fi
 for config_value in "${required_kernel_config[@]}"; do
     grep -qx "${config_value}" .config ||
         fail "resolved kernel config is missing ${config_value}"
@@ -149,7 +182,7 @@ KBUILD_BUILD_TIMESTAMP='Thu Jan  1 00:00:00 UTC 1970' \
 KBUILD_BUILD_USER=akernel \
 KBUILD_BUILD_HOST=builder \
 KBUILD_BUILD_VERSION=1 \
-    make -j"$(nproc)" vmlinux
+    make -j"${build_jobs}" vmlinux
 
 kernel_release="$(make -s kernelrelease)"
 source_commit="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
@@ -182,17 +215,18 @@ jq -n \
     --arg workflow_run_id "${workflow_run_id}" \
     --arg release_tag "${release_tag}" \
     --arg architecture x86_64 \
+    --arg kernel_profile "${kernel_profile}" \
     --arg vmm_version "v${FIRECRACKER_VERSION}" \
     --arg vmm_url "https://github.com/${source_repository}/tree/${source_commit}" \
     --arg vmm_sha256 "${vmm_sha256}" \
-    --arg kernel_repository https://github.com/amazonlinux/linux \
+    --arg kernel_repository "${kernel_repository}" \
     --arg kernel_tag "${GUEST_KERNEL_TAG}" \
     --arg kernel_url "${kernel_url}" \
     --arg kernel_source_sha256 "${GUEST_KERNEL_SOURCE_SHA256}" \
     --arg kernel_release "${kernel_release}" \
     --arg kernel_sha256 "${kernel_sha256}" \
     --arg kernel_config_sha256 "${kernel_config_sha256}" \
-    --arg base_config "resources/guest_configs/microvm-kernel-ci-x86_64-${GUEST_KERNEL_VERSION}.config" \
+    --arg base_config "${base_config_path}" \
     --arg base_config_sha256 "${base_config_sha256}" \
     --arg fragment resources/akernel/kernel/akernel.config \
     --arg fragment_sha256 "${fragment_sha256}" \
@@ -205,6 +239,7 @@ jq -n \
         workflow_run_id: $workflow_run_id,
         release_tag: $release_tag,
         architecture: $architecture,
+        kernel_profile: $kernel_profile,
         vmm: {
             source: "fork-source-build",
             version: $vmm_version,

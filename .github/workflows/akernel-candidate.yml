@@ -1,6 +1,6 @@
 name: AKernel Firecracker candidate
 
-run-name: Build candidate ${{ inputs.release_tag }}
+run-name: Build candidate ${{ inputs.release_tag }} (${{ inputs.kernel_profile }})
 
 "on":
   workflow_dispatch:
@@ -10,6 +10,14 @@ run-name: Build candidate ${{ inputs.release_tag }}
         required: true
         default: v1.16.1-akernel.0
         type: string
+      kernel_profile:
+        description: Guest kernel profile (PVM requires paired OOT host modules)
+        required: true
+        default: kvm
+        type: choice
+        options:
+          - kvm
+          - pvm
 
 concurrency:
   group: akernel-firecracker-candidate-${{ github.ref }}
@@ -25,6 +33,7 @@ jobs:
     timeout-minutes: 90
     env:
       RELEASE_TAG: ${{ inputs.release_tag }}
+      AKERNEL_KERNEL_PROFILE: ${{ inputs.kernel_profile }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -144,12 +153,14 @@ jobs:
           test "$(jq -er '.workflow_run_id' "${manifest}")" = \
             "${GITHUB_RUN_ID}"
           test "$(jq -er '.release_tag' "${manifest}")" = "${RELEASE_TAG}"
+          test "$(jq -er '.kernel_profile' "${manifest}")" = "${AKERNEL_KERNEL_PROFILE}"
           test "$(jq -er '.vmm.source' "${manifest}")" = \
             "fork-source-build"
 
           mkdir extracted
           tar -xzf "${archive}" -C extracted
           bundle_dir="extracted/release-${RELEASE_TAG}-x86_64"
+          cmp "${manifest}" "${bundle_dir}/manifest.json"
           (
             cd "${bundle_dir}"
             sha256sum --check SHA256SUMS
@@ -177,6 +188,7 @@ jobs:
             echo
             echo "- Run ID: ${GITHUB_RUN_ID}"
             echo "- Planned release: ${RELEASE_TAG}"
+            echo "- Kernel profile: ${AKERNEL_KERNEL_PROFILE}"
             echo "- Commit: ${GITHUB_SHA}"
             echo "- Artifact digest: ${{ steps.upload.outputs.artifact-digest }}"
             echo "- Artifact: ${{ steps.upload.outputs.artifact-url }}"
