@@ -43,7 +43,7 @@ case "${kernel_profile}" in
         # PVM has a separate immutable source pin and a tested 6.12 config.
         # Keep the default Amazon Linux bundle unchanged.
         source "${SCRIPT_DIR}/pvm-kernel-versions.env"
-        kernel_repository="https://github.com/virt-pvm/linux"
+        kernel_repository="${GUEST_KERNEL_SOURCE_REPOSITORY:?missing PVM guest source repository}"
         base_config_path="resources/akernel/kernel/pvm-guest.config"
         ;;
     *) fail "AKERNEL_KERNEL_PROFILE must be kvm or pvm" ;;
