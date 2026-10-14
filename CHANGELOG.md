@@ -8,6 +8,13 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the opt-in PVM guest source to default strict TSC behavior for
+  checkpoint/restore, including mode selection after effective command-line
+  initialization. Raw guest TSC reads can still move backwards after restore;
+  `pvm_tsc=unsafe` retains the original clock and timer behavior.
+
 ### Added
 
 - Added an opt-in AKernel runtime bundle with a checksum-pinned PVM 6.12 guest

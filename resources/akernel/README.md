@@ -32,7 +32,7 @@ initrd are intentionally excluded.
 
 The default `kvm` profile keeps the Amazon Linux 6.1 guest source and
 configuration. Select `pvm` explicitly to build the tested PVM 6.12 guest
-instead. `pvm-kernel-versions.env` pins the `virt-pvm/linux` source commit and
+instead. `pvm-kernel-versions.env` pins the `hky1999/linux` strict-TSC source commit and
 archive checksum; `kernel/pvm-guest.config` contains the resolved guest
 configuration. The builder merges the common AKernel fragment and verifies its
 required built-in filesystem, network, and virtio options as well as
@@ -66,6 +66,10 @@ sandboxd and AKernel revision before promotion.
 This guest bundle runs on a distribution host kernel with a matching out-of-tree PVM `kvm.ko`/`kvm-pvm.ko` pair built from `virt-pvm/linux`'s `pvm-6.12-host-oot` source and the qualified target-version compatibility changes. The deployment does not require rebuilding or replacing the host kernel binary. AKernel's `deploy/pvm/oot-host.env` fixes the separately tested host-module source; its `deploy/pvm-runtime.md` documents build, loading and rollback. The OOT branch contains the host implementation only, so `pvm-kernel-versions.env` deliberately retains the separate PVM-enabled guest source. The bundle does not build or install host modules.
 
 VMX/SVM need not be exposed to the host/L1. Qualification used an original Ubuntu `7.0.0-30-generic` L1 with both VMX and SVM hidden, while stock Intel KVM loading failed and the OOT PVM pair loaded successfully. The CPU must still support FSGSBASE, RDTSCP and CMPXCHG16B, and the tested host uses `nokaslr pti=off` with FRED disabled and KASAN unsupported. Built-in KVM cannot be replaced this way; existing VM users must be stopped before switching the matched module pair. Keep the distribution networking/storage modules available and satisfy its module-signing policy. Other host kernel versions and AMD execution need separate qualification.
+
+The PVM guest source is `hky1999/linux` commit `ca68979e554da5c483c627ced55cb7a55f605b11`, based on the PVM 6.12 guest and its three TSC patches. Strict mode is the default: it marks TSC unstable, disables TSC deadline/adjust features, ignores pvclock's stable-TSC bit and clamps a negative pvclock TSC delta to zero. Its mode parser runs after the effective boot command line is initialized, before kvmclock setup; built-in append/override policy and last-option precedence apply. Unknown or empty `pvm_tsc` values select strict mode. `pvm_tsc=unsafe` restores the original clock/timer selection and can stall timers after a TSC-domain change; keep strict mode for checkpoint/restore workloads.
+
+Strict mode targets POSIX clock and timer progress after a TSC offset changes. Raw RDTSC/RDTSCP can still move backwards; this does not establish heterogeneous CPU migration support or TSC scaling. High-resolution `clock_gettime` can lose its vDSO fast path (previous isolated measurements: roughly 28 ns to 382 ns per call); coarse clock reads remain fast. Preserve backend, TSC-frequency, kernel/initrd/VMM/virtiofsd digest and kernel-argument compatibility checks. A new guest digest requires draining/recreating sandboxes or retaining the old stack for its snapshots. This source pin selects a new PVM candidate; it does not promote a runtime release or change ordinary KVM defaults.
 
 Hardware KVM and PVM checkpoints carry different vCPU state and cannot be interchanged. PVM does not provide TSC scaling. The sandboxd `firecracker-pvm` runtime profile owns backend detection and restore restrictions; validate the actual `/dev/kvm` ABI before advertising the runtime. Build the guest-agent initrd from the consuming sandboxd revision, as with the default bundle.
 
