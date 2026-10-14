@@ -91,3 +91,5 @@ resources/akernel/test-virtiofs-snapshot.sh \
     /path/to/virtiofsd \
     /xfs/path/new-test-directory
 ```
+
+The temporary `akernel-dev/firecracker:feat/pvm-candidate-adx` integration branch builds PVM candidates on pushes through the existing candidate workflow. Its planned tag is owned by `pvm-candidate.env`. Candidates retain the source commit, workflow run ID, profile, checksums and normal artifact expiration. Promotion still requires a successful manual candidate run from `develop`; integration-branch builds cannot be promoted by bypassing that gate. The PVM kernel fork is a temporary immutable integration source; send generic guest/host fixes to `virt-pvm/linux` and repin its reviewed commits once available.
