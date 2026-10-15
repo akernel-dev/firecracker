@@ -8,13 +8,27 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the opt-in PVM guest source to default strict TSC behavior for
+  checkpoint/restore, including mode selection after effective command-line
+  initialization. Raw guest TSC reads can still move backwards after restore;
+  `pvm_tsc=unsafe` retains the original clock and timer behavior.
+
 ### Added
 
-- Added opt-in `SyncDirect` and `AsyncDirect` block I/O engines with bounded alignment adaptation for private images. Direct engine selection is preserved across disk updates and snapshots.
+- Added an opt-in AKernel runtime bundle with a checksum-pinned PVM 6.12 guest
+  kernel and recorded kernel profile. The default bundle retains its Amazon
+  Linux 6.1 kernel. PVM hosts use matched OOT modules on a distribution kernel;
+  nested hardware virtualization is not required.
+- Added opt-in `SyncDirect` and `AsyncDirect` block I/O engines with bounded
+  alignment adaptation for private images. Direct engine selection is preserved
+  across disk updates and snapshots.
 
 ### Fixed
 
-- Async block flushes now wait for earlier I/O submissions before executing fsync.
+- Async block flushes now wait for earlier I/O submissions before executing
+  fsync.
 
 ## [1.16.1]
 
