@@ -163,6 +163,7 @@ required_kernel_config=(
 )
 if [ "${kernel_profile}" = pvm ]; then
     required_kernel_config+=(
+        CONFIG_KVM_GUEST=y
         CONFIG_PVM_GUEST=y
         CONFIG_X86_PIE=y
         CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS=y
