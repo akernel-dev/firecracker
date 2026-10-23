@@ -44,7 +44,7 @@ The guest config explicitly enables `CONFIG_KVM_GUEST=y`, `CONFIG_PVM_GUEST=y`, 
 ```sh
 AKERNEL_KERNEL_PROFILE=pvm AKERNEL_BUILD_JOBS=8 \
     resources/akernel/build-runtime-bundle.sh \
-    v1.16.1-akernel.4 /path/to/new-pvm-candidate
+    v1.17.0-akernel.1 /path/to/new-pvm-candidate
 ```
 
 Use an unused planned release tag; the tag above is an example, not an existing
