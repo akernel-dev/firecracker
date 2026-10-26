@@ -1,4 +1,4 @@
-name: Check no dependencies were modified
+name: Check dependency changes
 
 on: pull_request
 
@@ -14,8 +14,13 @@ jobs:
         uses: actions/checkout@v3
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
 
-      - name: "Check Cargo.lock not in changeset" 
+      - name: "Test dependency policy"
+        run: python3 resources/akernel/check-dependency-changes_test.py
+
+      - name: "Check Cargo.lock changes against upstream"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          git fetch origin
-          git diff origin/$GITHUB_BASE_REF.. --name-only| ( ! grep "Cargo.lock")
+          python3 resources/akernel/check-dependency-changes.py "${BASE_SHA}"
