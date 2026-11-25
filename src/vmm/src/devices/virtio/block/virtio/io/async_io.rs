@@ -1,6 +1,8 @@
 // Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::layers::Layers;
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::fs::File;
 use std::os::fd::RawFd;
@@ -42,10 +44,15 @@ pub struct AsyncFileEngine {
     pub(super) direct: Option<DirectIo>,
     ring: IoUring<WrappedRequest>,
     completion_evt: EventFd,
+    pub(super) layers: Option<Layers>,
+    pending_writes: usize,
+    ready: VecDeque<Cqe<WrappedRequest>>,
+    read_slot: u32,
 }
 
 #[derive(Debug)]
 pub struct WrappedRequest {
+    written: Option<(std::ops::Range<usize>, usize, u32)>,
     addr: Option<GuestAddress>,
     bounce: Option<AlignedBuffer>,
     req: PendingRequest,
@@ -54,6 +61,7 @@ pub struct WrappedRequest {
 impl WrappedRequest {
     fn new(req: PendingRequest) -> Self {
         WrappedRequest {
+            written: None,
             addr: None,
             bounce: None,
             req,
@@ -62,6 +70,7 @@ impl WrappedRequest {
 
     fn new_with_dirty_tracking(addr: GuestAddress, req: PendingRequest) -> Self {
         WrappedRequest {
+            written: None,
             addr: Some(addr),
             bounce: None,
             req,
@@ -71,12 +80,12 @@ impl WrappedRequest {
 
 impl AsyncFileEngine {
     fn new_ring(
-        file: &File,
+        files: Vec<&File>,
         completion_fd: RawFd,
     ) -> Result<IoUring<WrappedRequest>, IoUringError> {
         IoUring::new(
             u32::from(IO_URING_NUM_ENTRIES),
-            vec![file],
+            files,
             vec![
                 // Make sure we only allow operations on pre-registered fds.
                 Restriction::RequireFixedFds,
@@ -91,14 +100,25 @@ impl AsyncFileEngine {
     }
 
     pub fn from_file(file: File) -> Result<AsyncFileEngine, AsyncIoError> {
+        Self::with_layers(file, None)
+    }
+
+    pub(super) fn with_layers(file: File, layers: Option<Layers>) -> Result<Self, AsyncIoError> {
         log_dev_preview_warning("Async file IO", Option::None);
 
         let completion_evt = EventFd::new(libc::EFD_NONBLOCK).map_err(AsyncIoError::EventFd)?;
+        let files = layers
+            .as_ref()
+            .map_or_else(|| vec![&file], |l| l.files.iter().collect());
         let ring =
-            Self::new_ring(&file, completion_evt.as_raw_fd()).map_err(AsyncIoError::IoUring)?;
+            Self::new_ring(files, completion_evt.as_raw_fd()).map_err(AsyncIoError::IoUring)?;
 
         Ok(AsyncFileEngine {
             file,
+            layers,
+            pending_writes: 0,
+            ready: VecDeque::new(),
+            read_slot: 0,
             direct: None,
             ring,
             completion_evt,
@@ -172,7 +192,10 @@ impl AsyncFileEngine {
             .map(|_| DirectIo::new(&file))
             .transpose()
             .map_err(AsyncIoError::IO)?;
-        let ring = Self::new_ring(&file, self.completion_evt.as_raw_fd())
+        if self.layers.is_some() {
+            return Err(AsyncIoError::NotImplemented);
+        }
+        let ring = Self::new_ring(vec![&file], self.completion_evt.as_raw_fd())
             .map_err(AsyncIoError::IoUring)?;
 
         self.file = file;
@@ -189,6 +212,43 @@ impl AsyncFileEngine {
         &self.completion_evt
     }
 
+    pub(super) fn read_layer(
+        &mut self,
+        offset: u64,
+        mem: &GuestMemoryMmap,
+        addr: GuestAddress,
+        count: u32,
+    ) -> Result<bool, AsyncIoError> {
+        if self.pending_writes != 0 {
+            self.drain(false)?;
+            while let Some(cqe) = self.reap()? {
+                self.ready.push_back(cqe);
+            }
+        }
+        let layer = self.layers.as_ref().unwrap();
+        let range = layer.sectors(offset, count).map_err(AsyncIoError::IO)?;
+        if let Some(slot) = layer.source(range.clone()) {
+            self.read_slot = slot;
+            return Ok(false);
+        }
+        // Validate the entire destination before issuing any partial transfer.
+        mem.get_slice(addr, count as usize)
+            .map_err(AsyncIoError::GuestMemoryBackend)?;
+        let mut buf = vec![0; (count as usize).min(64 * 1024)];
+        for start in (range.start..range.end).step_by(128) {
+            let end = (start + 128).min(range.end);
+            let bytes = &mut buf[..(end - start) * 512];
+            layer
+                .read_mixed(start..end, bytes)
+                .map_err(AsyncIoError::IO)?;
+            mem.write_slice(
+                bytes,
+                GuestAddress(addr.0 + ((start - range.start) * 512) as u64),
+            )
+            .map_err(AsyncIoError::GuestMemoryBackend)?;
+        }
+        Ok(true)
+    }
     pub fn push_read(
         &mut self,
         offset: u64,
@@ -217,7 +277,7 @@ impl AsyncFileEngine {
 
         self.ring
             .push(Operation::read(
-                0,
+                self.read_slot,
                 buf as usize,
                 count,
                 offset,
@@ -252,12 +312,28 @@ impl AsyncFileEngine {
             Err(error) => return Err(RequestError { req, error }),
         };
         let buf = bounce.as_ref().map_or(buf, AlignedBuffer::as_ptr);
+        let mut slot = 0;
+        let mut written = None;
+        if let Some(layer) = &self.layers {
+            let range = match layer.sectors(offset, count) {
+                Ok(range) => range,
+                Err(e) => {
+                    return Err(RequestError {
+                        req,
+                        error: AsyncIoError::IO(e),
+                    });
+                }
+            };
+            slot = layer.active();
+            written = Some((range, layer.epoch(), slot));
+        }
         let mut wrapped_user_data = WrappedRequest::new(req);
+        wrapped_user_data.written = written;
         wrapped_user_data.bounce = bounce;
 
         self.ring
             .push(Operation::write(
-                0,
+                slot,
                 buf as usize,
                 count,
                 offset,
@@ -266,14 +342,24 @@ impl AsyncFileEngine {
             .map_err(|(io_uring_error, data)| RequestError {
                 req: data.req,
                 error: AsyncIoError::IoUring(io_uring_error),
-            })
+            })?;
+        if self.layers.is_some() {
+            self.pending_writes += 1;
+        }
+        Ok(())
     }
 
     pub fn push_flush(&mut self, req: PendingRequest) -> Result<(), RequestError<AsyncIoError>> {
         let wrapped_user_data = WrappedRequest::new(req);
 
         self.ring
-            .push(Operation::fsync(0, wrapped_user_data).drained())
+            .push(
+                Operation::fsync(
+                    self.layers.as_ref().map_or(0, Layers::active),
+                    wrapped_user_data,
+                )
+                .drained(),
+            )
             .map_err(|(io_uring_error, data)| RequestError {
                 req: data.req,
                 error: AsyncIoError::IoUring(io_uring_error),
@@ -306,18 +392,42 @@ impl AsyncFileEngine {
     }
 
     pub fn drain_and_flush(&mut self, discard_cqes: bool) -> Result<(), AsyncIoError> {
-        self.drain(discard_cqes)?;
-
-        // Sync data out to physical media on host.
-        // We don't need to call flush first since all the ops are performed through io_uring
-        // and Rust shouldn't manage any data in its internal buffers.
-        self.file.sync_all().map_err(AsyncIoError::SyncAll)?;
-
-        Ok(())
+        let result = self.drain(discard_cqes).and_then(|()| {
+            let file = self
+                .layers
+                .as_ref()
+                .map_or(&self.file, |layers| &layers.files[layers.active() as usize]);
+            file.sync_all().map_err(AsyncIoError::SyncAll)
+        });
+        if result.is_err()
+            && let Some(layers) = &self.layers
+        {
+            layers.fail();
+        }
+        result
     }
 
     fn do_pop(&mut self) -> Result<Option<Cqe<WrappedRequest>>, AsyncIoError> {
-        self.ring.pop().map_err(AsyncIoError::IoUring)
+        if let Some(cqe) = self.ready.pop_front() {
+            return Ok(Some(cqe));
+        }
+        self.reap()
+    }
+    fn reap(&mut self) -> Result<Option<Cqe<WrappedRequest>>, AsyncIoError> {
+        Ok(self.ring.pop().map_err(AsyncIoError::IoUring)?.map(|cqe| {
+            let count = cqe.count() as usize;
+            cqe.map_user_data(|mut data| {
+                if let Some((range, epoch, slot)) = data.written.take() {
+                    self.pending_writes -= 1;
+                    if count == range.len() * 512 {
+                        self.layers.as_mut().unwrap().complete(range, epoch, slot);
+                    } else {
+                        self.layers.as_ref().unwrap().fail();
+                    }
+                }
+                data
+            })
+        }))
     }
 
     pub fn pop(

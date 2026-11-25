@@ -5,6 +5,7 @@ pub mod async_io;
 pub mod direct_io;
 #[cfg(test)]
 mod direct_io_tests;
+mod layers;
 pub mod sync_io;
 
 use vm_memory::GuestMemoryBackend;
@@ -77,6 +78,14 @@ impl FileEngine {
         }
     }
 
+    pub(super) fn checkpoint_disk(file: File, dir: &std::path::Path) -> Result<Self, BlockIoError> {
+        let layers = layers::Layers::open(&file, dir)
+            .map_err(|e| BlockIoError::Async(AsyncIoError::IO(e)))?;
+        AsyncFileEngine::with_layers(file, Some(layers))
+            .map(Self::Async)
+            .map_err(BlockIoError::Async)
+    }
+
     pub fn update_file_path(&mut self, file: File) -> Result<(), BlockIoError> {
         match self {
             FileEngine::Async(engine) => engine.update_file(file).map_err(BlockIoError::Async)?,
@@ -101,6 +110,20 @@ impl FileEngine {
         count: u32,
         req: PendingRequest,
     ) -> Result<FileEngineOk, RequestError<BlockIoError>> {
+        if let Self::Async(engine) = self
+            && engine.layers.is_some()
+        {
+            match engine.read_layer(offset, mem, addr, count) {
+                Ok(true) => return Ok(FileEngineOk::Executed(RequestOk { req, count })),
+                Ok(false) => {}
+                Err(error) => {
+                    return Err(RequestError {
+                        req,
+                        error: BlockIoError::Async(error),
+                    });
+                }
+            }
+        }
         if let Self::Async(engine) = self
             && let Some(direct) = engine.direct
         {

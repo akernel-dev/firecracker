@@ -125,11 +125,25 @@ impl DiskProperties {
         let disk_size = Self::file_size(&disk_image_path, &mut disk_image)?;
         let image_id = Self::build_disk_image_id(&disk_image);
 
+        // Match the configured drive path verbatim, including on snapshot restore.
+        let engine = if std::env::var_os("FC_SEALED_BLOCK_PATH").as_deref()
+            == Some(std::ffi::OsStr::new(&disk_image_path))
+        {
+            if is_disk_read_only || file_engine_type != FileEngineType::Async {
+                return Err(VirtioBlockError::Config);
+            }
+            let dir = std::path::Path::new(&disk_image_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            FileEngine::checkpoint_disk(disk_image, dir)
+        } else {
+            FileEngine::from_file(disk_image, file_engine_type)
+        }
+        .map_err(VirtioBlockError::FileEngine)?;
         Ok(Self {
             file_path: disk_image_path,
             engine_type: file_engine_type,
-            file_engine: FileEngine::from_file(disk_image, file_engine_type)
-                .map_err(VirtioBlockError::FileEngine)?,
+            file_engine: engine,
             nsectors: disk_size >> SECTOR_SHIFT,
             image_id,
         })
