@@ -17,6 +17,9 @@ and this project adheres to
 
 ### Added
 
+- Added an experimental sealed-generation Async block backend and reference
+  incremental checkpoint publisher for AKernel.
+
 - Added an opt-in AKernel runtime bundle with a checksum-pinned PVM 6.12 guest
   kernel and recorded kernel profile. The default bundle retains its Amazon
   Linux 6.1 kernel. PVM hosts use matched OOT modules on a distribution kernel;
